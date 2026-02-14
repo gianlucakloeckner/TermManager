@@ -1,0 +1,61 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --frozen --extra dev
+
+      - name: Build app
+        run: uv run pyinstaller --name TerminologyManager --windowed --onefile src/terminology_manager/main.py
+
+      - name: Archive artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r TerminologyManager-macos-${{ github.ref_name }}.zip TerminologyManager.app || zip TerminologyManager-macos-${{ github.ref_name }}.zip TerminologyManager
+
+      - name: Archive artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/TerminologyManager.exe -DestinationPath dist/TerminologyManager-windows-${{ github.ref_name }}.zip
+
+      - name: Upload release asset (macOS)
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/TerminologyManager-macos-${{ github.ref_name }}.zip
+
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/TerminologyManager-windows-${{ github.ref_name }}.zip

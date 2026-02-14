@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "terminology-manager"
+version = "0.1.0"
+description = "Modern PySide6 terminology manager"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "TermManager Team" }]
+dependencies = [
+  "PySide6>=6.8",
+  "SQLAlchemy>=2.0",
+  "alembic>=1.14",
+  "Pillow>=10.4",
+  "pandas>=2.2",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.9",
+  "black>=24.10",
+  "mypy>=1.13",
+  "pyinstaller>=6.11",
+]
+
+[project.scripts]
+terminology-manager = "terminology_manager.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminology_manager"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/terminology_manager/assets/k&z_logo.svg" = "terminology_manager/assets/k&z_logo.svg"
+"src/terminology_manager/assets/lock-open.svg" = "terminology_manager/assets/lock-open.svg"
+"src/terminology_manager/assets/lock-closed.svg" = "terminology_manager/assets/lock-closed.svg"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/terminology_manager/assets/k&z_logo.svg",
+  "src/terminology_manager/assets/lock-open.svg",
+  "src/terminology_manager/assets/lock-closed.svg",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+show_error_codes = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
