@@ -12,11 +12,14 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 
 class CommandPaletteDialog(QDialog):
-    def __init__(self, actions: dict[str, Callable[[], None]], parent=None) -> None:
+    def __init__(
+        self, actions: dict[str, Callable[[], None]], parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Befehlspalette")
         self.setModal(True)
@@ -35,7 +38,7 @@ class CommandPaletteDialog(QDialog):
         self.list_widget = QListWidget(self)
         layout.addWidget(self.list_widget)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 

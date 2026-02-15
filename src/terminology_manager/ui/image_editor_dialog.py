@@ -14,13 +14,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from terminology_manager.services.image_editor import ImageEditOptions, apply_image_edits
 
 
 class ImageEditorDialog(QDialog):
-    def __init__(self, image_bytes: bytes, parent=None) -> None:
+    def __init__(self, image_bytes: bytes, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Bildbearbeitung")
         self.resize(760, 520)
@@ -74,7 +75,9 @@ class ImageEditorDialog(QDialog):
         controls.addWidget(btn_reset)
         controls.addStretch(1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         controls.addWidget(buttons)

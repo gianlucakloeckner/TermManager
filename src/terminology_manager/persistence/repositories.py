@@ -80,7 +80,7 @@ class ChapterRepository:
         self.session = session
 
     def list_all(self) -> list[Chapter]:
-        return self.session.scalars(select(Chapter).order_by(Chapter.name_de.asc())).all()
+        return list(self.session.scalars(select(Chapter).order_by(Chapter.name_de.asc())).all())
 
     def get(self, chapter_id: int) -> Chapter | None:
         return self.session.get(Chapter, chapter_id)
@@ -105,9 +105,10 @@ class ChapterRepository:
             self.session.add(chapter)
             self.session.flush()
             return chapter
-        chapter = self.session.get(Chapter, chapter_id)
-        if chapter is None:
+        chapter_opt = self.session.get(Chapter, chapter_id)
+        if chapter_opt is None:
             raise ValueError("chapter not found")
+        chapter = chapter_opt
         chapter.name_de = name_de.strip()
         chapter.name_en = name_en.strip()
         chapter.visible = visible
@@ -133,7 +134,7 @@ class TermRepository:
             )
             .order_by(Term.de.asc())
         )
-        return self.session.scalars(stmt).unique().all()
+        return list(self.session.scalars(stmt).unique().all())
 
     def get(self, term_id: int) -> Term | None:
         stmt: Select[tuple[Term]] = (
@@ -293,7 +294,7 @@ class TermRepository:
             .options(joinedload(Term.synonyms))
             .where((Term.de.ilike(de.strip())) | (Term.en.ilike(en.strip())))
         )
-        terms = self.session.scalars(stmt).unique().all()
+        terms = list(self.session.scalars(stmt).unique().all())
 
         if normalized_syns:
             syn_stmt: Select[tuple[Term]] = (
@@ -302,7 +303,7 @@ class TermRepository:
                 .where(Synonym.synonym.in_(normalized_syns))
                 .options(joinedload(Term.synonyms))
             )
-            terms.extend(self.session.scalars(syn_stmt).unique().all())
+            terms.extend(list(self.session.scalars(syn_stmt).unique().all()))
 
         uniq: dict[int, Term] = {term.id: term for term in terms}
         return list(uniq.values())

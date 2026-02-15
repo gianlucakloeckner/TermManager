@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from terminology_manager.domain.entities import SearchResult, VersionRecord
 from terminology_manager.persistence.database import session_scope
@@ -28,7 +28,7 @@ class DuplicateReport:
 
 
 class TerminologyService:
-    def __init__(self, session_factory: sessionmaker):
+    def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
 
     def list_terms(self) -> list[dict[str, Any]]:

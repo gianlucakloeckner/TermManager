@@ -100,7 +100,7 @@ class ChapterDialog(QDialog):
         self,
         chapter: Chapter | None = None,
         chapters: list[Chapter] | None = None,
-        parent=None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Kapitel")
@@ -1046,11 +1046,11 @@ class MainWindow(QMainWindow):
         selector.exec()
 
     def _check_duplicates(self) -> None:
-        synonyms = [
-            self.syn_table.item(r, 1).text()
-            for r in range(self.syn_table.rowCount())
-            if self.syn_table.item(r, 1) is not None
-        ]
+        synonyms: list[str] = []
+        for r in range(self.syn_table.rowCount()):
+            item = self.syn_table.item(r, 1)
+            if item is not None:
+                synonyms.append(item.text())
         report = self.service.detect_duplicates(self.term_de.text(), self.term_en.text(), synonyms)
 
         parts: list[str] = []
