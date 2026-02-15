@@ -24,8 +24,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName(config.app_name)
-    app.setStyleSheet(
-        """
+    app.setStyleSheet("""
         QWidget { font-family: 'Segoe UI'; font-size: 12px; }
         QMainWindow { background: #15171A; }
         QLineEdit, QTextEdit, QTreeWidget, QTableWidget, QListWidget, QTextBrowser {
@@ -41,8 +40,7 @@ def main() -> int:
         QToolBar { background: #111827; color: #E6EAF0; spacing: 6px; }
         QLabel { color: #D1D5DB; }
         QHeaderView::section { background: #111827; color: #E5E7EB; padding: 4px; }
-        """
-    )
+        """)
 
     window = MainWindow(TerminologyService(session_factory))
     window.show()

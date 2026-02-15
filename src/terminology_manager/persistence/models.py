@@ -34,7 +34,9 @@ class Term(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
 
-    synonyms: Mapped[list[Synonym]] = relationship(back_populates="term", cascade="all, delete-orphan")
+    synonyms: Mapped[list[Synonym]] = relationship(
+        back_populates="term", cascade="all, delete-orphan"
+    )
     annotations: Mapped[list[Annotation]] = relationship(
         back_populates="term", cascade="all, delete-orphan"
     )
@@ -79,7 +81,9 @@ class Chapter(Base):
         ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True
     )
 
-    terms: Mapped[list[TermChapter]] = relationship(back_populates="chapter", cascade="all, delete-orphan")
+    terms: Mapped[list[TermChapter]] = relationship(
+        back_populates="chapter", cascade="all, delete-orphan"
+    )
     parent: Mapped[Chapter | None] = relationship(
         "Chapter", remote_side="Chapter.id", back_populates="children"
     )
@@ -92,7 +96,9 @@ class TermChapter(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     term_id: Mapped[int] = mapped_column(ForeignKey("terms.id", ondelete="CASCADE"), nullable=False)
-    chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False)
+    chapter_id: Mapped[int] = mapped_column(
+        ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False
+    )
 
     term: Mapped[Term] = relationship(back_populates="chapters")
     chapter: Mapped[Chapter] = relationship(back_populates="terms")

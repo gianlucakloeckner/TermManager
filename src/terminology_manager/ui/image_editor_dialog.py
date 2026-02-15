@@ -42,7 +42,14 @@ class ImageEditorDialog(QDialog):
         self.resize_h = QSpinBox(self)
         self.quality = QSpinBox(self)
 
-        for spin in [self.crop_x, self.crop_y, self.crop_w, self.crop_h, self.resize_w, self.resize_h]:
+        for spin in [
+            self.crop_x,
+            self.crop_y,
+            self.crop_w,
+            self.crop_h,
+            self.resize_w,
+            self.resize_h,
+        ]:
             spin.setRange(0, 9999)
         self.rotate.setRange(-360, 360)
         self.quality.setRange(10, 95)

@@ -76,11 +76,13 @@ def import_terms(source: Path) -> list[dict[str, Any]]:
                 "en": str(row.get("en", "")).strip(),
                 "de_desc": str(row.get("de_desc", "")).strip(),
                 "en_desc": str(row.get("en_desc", "")).strip(),
-                "chapter_ids": json.loads(chapter_ids) if isinstance(chapter_ids, str) else chapter_ids,
+                "chapter_ids": (
+                    json.loads(chapter_ids) if isinstance(chapter_ids, str) else chapter_ids
+                ),
                 "synonyms": json.loads(synonyms) if isinstance(synonyms, str) else (synonyms or []),
-                "annotations": json.loads(annotations)
-                if isinstance(annotations, str)
-                else (annotations or []),
+                "annotations": (
+                    json.loads(annotations) if isinstance(annotations, str) else (annotations or [])
+                ),
             }
         )
     return output

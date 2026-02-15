@@ -19,7 +19,9 @@ def fuzzy_score(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=normalize(a), b=normalize(b)).ratio()
 
 
-def find_fuzzy_matches(value: str, candidates: list[str], threshold: float = 0.9) -> list[DuplicateSignal]:
+def find_fuzzy_matches(
+    value: str, candidates: list[str], threshold: float = 0.9
+) -> list[DuplicateSignal]:
     hits: list[DuplicateSignal] = []
     n_value = normalize(value)
     if not n_value:

@@ -327,7 +327,9 @@ class MainWindow(QMainWindow):
         syn_buttons = QHBoxLayout()
         self.btn_syn_add = QPushButton("+", self)
         self.btn_syn_del = QPushButton("-", self)
-        self.btn_syn_add.clicked.connect(lambda: self._append_table_row(self.syn_table, ["de", "", "1"]))
+        self.btn_syn_add.clicked.connect(
+            lambda: self._append_table_row(self.syn_table, ["de", "", "1"])
+        )
         self.btn_syn_del.clicked.connect(lambda: self._remove_selected_table_row(self.syn_table))
         syn_buttons.addWidget(self.btn_syn_add)
         syn_buttons.addWidget(self.btn_syn_del)
@@ -345,7 +347,9 @@ class MainWindow(QMainWindow):
         ann_buttons = QHBoxLayout()
         self.btn_ann_add = QPushButton("+", self)
         self.btn_ann_del = QPushButton("-", self)
-        self.btn_ann_add.clicked.connect(lambda: self._append_table_row(self.ann_table, ["de", "", "1"]))
+        self.btn_ann_add.clicked.connect(
+            lambda: self._append_table_row(self.ann_table, ["de", "", "1"])
+        )
         self.btn_ann_del.clicked.connect(lambda: self._remove_selected_table_row(self.ann_table))
         ann_buttons.addWidget(self.btn_ann_add)
         ann_buttons.addWidget(self.btn_ann_del)
@@ -445,12 +449,21 @@ class MainWindow(QMainWindow):
         renderer.render(painter)
         painter.end()
         self.logo_label.setPixmap(
-            pix.scaled(140, 42, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            pix.scaled(
+                140,
+                42,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
 
     def _load_chapters(self, selected_ids: list[int] | None = None) -> None:
         selected = set(selected_ids or [])
-        filter_text = self.chapter_filter_input.text().strip().casefold() if hasattr(self, "chapter_filter_input") else ""
+        filter_text = (
+            self.chapter_filter_input.text().strip().casefold()
+            if hasattr(self, "chapter_filter_input")
+            else ""
+        )
         self.chapter_list.clear()
         chapters = self.service.list_chapters()
         by_parent: dict[int | None, list[Chapter]] = {}
@@ -478,11 +491,15 @@ class MainWindow(QMainWindow):
             for chapter in by_parent.get(parent_id, []):
                 if filter_text and chapter.id not in visible_ids:
                     continue
-                text = f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                text = (
+                    f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                )
                 node = QTreeWidgetItem([text])
                 node.setData(0, Qt.ItemDataRole.UserRole, chapter.id)
                 node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                node.setCheckState(0, Qt.CheckState.Checked if chapter.id in selected else Qt.CheckState.Unchecked)
+                node.setCheckState(
+                    0, Qt.CheckState.Checked if chapter.id in selected else Qt.CheckState.Unchecked
+                )
                 if not chapter.visible:
                     node.setForeground(0, Qt.GlobalColor.darkGray)
                 if parent_id is None:
@@ -558,7 +575,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Falsche PIN - Bearbeitung bleibt gesperrt", 3000)
             return
         self._set_lock_state(checked)
-        self.statusBar().showMessage("Bearbeitung entsperrt" if checked else "Bearbeitung gesperrt", 3000)
+        self.statusBar().showMessage(
+            "Bearbeitung entsperrt" if checked else "Bearbeitung gesperrt", 3000
+        )
 
     def _request_edit_pin(self) -> bool:
         entered, ok = QInputDialog.getText(
@@ -571,7 +590,9 @@ class MainWindow(QMainWindow):
             return False
         value = entered.strip()
         if len(value) != PIN_LENGTH:
-            QMessageBox.warning(self, "Ungültige PIN", f"Die PIN muss genau {PIN_LENGTH} Zeichen lang sein.")
+            QMessageBox.warning(
+                self, "Ungültige PIN", f"Die PIN muss genau {PIN_LENGTH} Zeichen lang sein."
+            )
             return False
         return value == EDIT_MODE_PIN
 
@@ -597,7 +618,9 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(self._apply_search_results)
         self.search_pool.start(worker)
 
-    def _apply_search_results(self, request_id: int, query: str, rows_with_images: list[tuple[SearchResult, str]]) -> None:
+    def _apply_search_results(
+        self, request_id: int, query: str, rows_with_images: list[tuple[SearchResult, str]]
+    ) -> None:
         if self.search_dropdown is None:
             return
         if (
@@ -619,7 +642,9 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, row.term_id)
             self.search_dropdown.addItem(item)
-            self.search_dropdown.setItemWidget(item, self._build_search_result_widget(title, chapter, image_b64))
+            self.search_dropdown.setItemWidget(
+                item, self._build_search_result_widget(title, chapter, image_b64)
+            )
             item.setSizeHint(QSize(0, 68))
 
         if self.search_dropdown.count() == 0:
@@ -646,7 +671,10 @@ class MainWindow(QMainWindow):
             pix = QPixmap()
             if pix.loadFromData(image_bytes):
                 thumb = pix.scaled(
-                    36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                    36,
+                    36,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
                 thumb_label.setPixmap(thumb)
         row.addWidget(thumb_label)
@@ -721,14 +749,22 @@ class MainWindow(QMainWindow):
         self._load_table(
             self.syn_table,
             rows=[
-                [str(s.get("lang", "de")), str(s.get("synonym", "")), "1" if s.get("allowed", True) else "0"]
+                [
+                    str(s.get("lang", "de")),
+                    str(s.get("synonym", "")),
+                    "1" if s.get("allowed", True) else "0",
+                ]
                 for s in term.get("synonyms", [])
             ],
         )
         self._load_table(
             self.ann_table,
             rows=[
-                [str(a.get("lang", "de")), str(a.get("note", "")), "1" if a.get("allowed", True) else "0"]
+                [
+                    str(a.get("lang", "de")),
+                    str(a.get("note", "")),
+                    "1" if a.get("allowed", True) else "0",
+                ]
                 for a in term.get("annotations", [])
             ],
         )
@@ -778,7 +814,8 @@ class MainWindow(QMainWindow):
                 {
                     "lang": lang_item.text().strip() or "de",
                     text_column_name: value_text,
-                    "allowed": (allowed_item.text().strip() if allowed_item else "1") in {"1", "true", "True", "yes"},
+                    "allowed": (allowed_item.text().strip() if allowed_item else "1")
+                    in {"1", "true", "True", "yes"},
                 }
             )
         return rows
@@ -803,7 +840,9 @@ class MainWindow(QMainWindow):
         de = self.term_de.text().strip()
         en = self.term_en.text().strip()
         if not de or not en:
-            QMessageBox.warning(self, "Fehlende Daten", "Deutsch- und Englisch-Begriff sind Pflicht.")
+            QMessageBox.warning(
+                self, "Fehlende Daten", "Deutsch- und Englisch-Begriff sind Pflicht."
+            )
             return
 
         chapter_ids: list[int] = []
@@ -838,9 +877,10 @@ class MainWindow(QMainWindow):
     def _delete_term(self) -> None:
         if not self.is_unlocked or self.current_term_id is None:
             return
-        if QMessageBox.question(
-            self, "Löschen", "Diesen Begriff wirklich löschen?"
-        ) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(self, "Löschen", "Diesen Begriff wirklich löschen?")
+            != QMessageBox.StandardButton.Yes
+        ):
             return
         self.service.delete_term(self.current_term_id)
         self.statusBar().showMessage("Begriff gelöscht", 3000)
@@ -850,7 +890,9 @@ class MainWindow(QMainWindow):
     def _pick_image(self) -> None:
         if not self.is_unlocked:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Bild auswählen", "", "Bilder (*.png *.jpg *.jpeg *.webp)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Bild auswählen", "", "Bilder (*.png *.jpg *.jpeg *.webp)"
+        )
         if not path:
             return
         self.current_image_bytes = Path(path).read_bytes()
@@ -980,9 +1022,12 @@ class MainWindow(QMainWindow):
             chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
             if not isinstance(chapter_id, int):
                 return
-            if QMessageBox.question(
-                selector, "Kapitel löschen", "Kapitel (inkl. Unterkapitel) wirklich löschen?"
-            ) != QMessageBox.StandardButton.Yes:
+            if (
+                QMessageBox.question(
+                    selector, "Kapitel löschen", "Kapitel (inkl. Unterkapitel) wirklich löschen?"
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
                 return
             self.service.delete_chapter(chapter_id)
             nonlocal_chapters_refresh()
@@ -1022,7 +1067,11 @@ class MainWindow(QMainWindow):
         if self.current_term_id is None:
             return
         records = self.service.history_for_term(self.current_term_id)
-        records = [rec for rec in records if self._history_has_visible_change(rec.action, rec.before_json, rec.after_json)]
+        records = [
+            rec
+            for rec in records
+            if self._history_has_visible_change(rec.action, rec.before_json, rec.after_json)
+        ]
         dlg = QDialog(self)
         dlg.setWindowTitle("Versionshistorie")
         dlg.resize(980, 620)
@@ -1055,7 +1104,11 @@ class MainWindow(QMainWindow):
                 if selected is None:
                     return
                 rec = selected.data(Qt.ItemDataRole.UserRole)
-                details.setHtml(self._history_details_html(rec.action, rec.before_json, rec.after_json, rec.changed_at))
+                details.setHtml(
+                    self._history_details_html(
+                        rec.action, rec.before_json, rec.after_json, rec.changed_at
+                    )
+                )
 
             event_list.itemSelectionChanged.connect(on_select)
             event_list.setCurrentRow(0)
@@ -1152,7 +1205,9 @@ class MainWindow(QMainWindow):
             return_html += self._history_image_preview_block(before_image, after_image)
         return return_html
 
-    def _history_changes(self, before_json: str | None, after_json: str | None) -> list[tuple[str, Any, Any]]:
+    def _history_changes(
+        self, before_json: str | None, after_json: str | None
+    ) -> list[tuple[str, Any, Any]]:
         before = self._history_parse_json(before_json)
         after = self._history_parse_json(after_json)
         ignored = {"updated_at", "image_b64"}

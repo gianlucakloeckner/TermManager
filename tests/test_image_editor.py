@@ -12,7 +12,9 @@ def test_apply_image_edits() -> None:
 
     out = apply_image_edits(
         src.getvalue(),
-        ImageEditOptions(crop_x=10, crop_y=10, crop_w=50, crop_h=50, rotate_deg=90, resize_w=40, resize_h=40),
+        ImageEditOptions(
+            crop_x=10, crop_y=10, crop_w=50, crop_h=50, rotate_deg=90, resize_w=40, resize_h=40
+        ),
     )
 
     edited = Image.open(io.BytesIO(out))

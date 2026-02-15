@@ -128,7 +128,9 @@ class TermRepository:
     def list_all(self) -> list[Term]:
         stmt: Select[tuple[Term]] = (
             select(Term)
-            .options(joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters))
+            .options(
+                joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters)
+            )
             .order_by(Term.de.asc())
         )
         return self.session.scalars(stmt).unique().all()
@@ -137,7 +139,9 @@ class TermRepository:
         stmt: Select[tuple[Term]] = (
             select(Term)
             .where(Term.id == term_id)
-            .options(joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters))
+            .options(
+                joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters)
+            )
         )
         return self.session.scalars(stmt).unique().one_or_none()
 
@@ -171,7 +175,9 @@ class TermRepository:
             self.session.delete(term)
 
     def replace_synonyms(self, term_id: int, rows: list[dict[str, Any]]) -> None:
-        self.session.query(Synonym).where(Synonym.term_id == term_id).delete(synchronize_session=False)
+        self.session.query(Synonym).where(Synonym.term_id == term_id).delete(
+            synchronize_session=False
+        )
         for row in rows:
             synonym = Synonym(
                 term_id=term_id,
@@ -183,7 +189,9 @@ class TermRepository:
         self.session.flush()
 
     def replace_annotations(self, term_id: int, rows: list[dict[str, Any]]) -> None:
-        self.session.query(Annotation).where(Annotation.term_id == term_id).delete(synchronize_session=False)
+        self.session.query(Annotation).where(Annotation.term_id == term_id).delete(
+            synchronize_session=False
+        )
         for row in rows:
             note = Annotation(
                 term_id=term_id,
@@ -195,7 +203,9 @@ class TermRepository:
         self.session.flush()
 
     def assign_chapters(self, term_id: int, chapter_ids: list[int]) -> None:
-        self.session.query(TermChapter).where(TermChapter.term_id == term_id).delete(synchronize_session=False)
+        self.session.query(TermChapter).where(TermChapter.term_id == term_id).delete(
+            synchronize_session=False
+        )
         for chapter_id in sorted(set(chapter_ids)):
             self.session.add(TermChapter(term_id=term_id, chapter_id=chapter_id))
         self.session.flush()
@@ -224,8 +234,7 @@ class TermRepository:
         if not query.strip():
             return []
         fts_query = self._build_fts_query(query)
-        sql = text(
-            """
+        sql = text("""
             SELECT
                 t.id AS term_id,
                 t.de AS de,
@@ -245,12 +254,15 @@ class TermRepository:
               AND (:include_hidden = 1 OR COALESCE(c.visible, 1) = 1)
             ORDER BY rank ASC, t.de ASC
             LIMIT 300;
-            """
+            """)
+        rows = (
+            self.session.execute(
+                sql,
+                {"q": fts_query, "include_hidden": 1 if include_hidden_chapters else 0},
+            )
+            .mappings()
+            .all()
         )
-        rows = self.session.execute(
-            sql,
-            {"q": fts_query, "include_hidden": 1 if include_hidden_chapters else 0},
-        ).mappings().all()
         seen: set[tuple[int, str | None]] = set()
         out: list[SearchResult] = []
         for row in rows:
@@ -276,8 +288,10 @@ class TermRepository:
 
     def duplicate_candidates(self, de: str, en: str, synonyms: list[str]) -> list[Term]:
         normalized_syns = [s.strip().lower() for s in synonyms if s.strip()]
-        stmt: Select[tuple[Term]] = select(Term).options(joinedload(Term.synonyms)).where(
-            (Term.de.ilike(de.strip())) | (Term.en.ilike(en.strip()))
+        stmt: Select[tuple[Term]] = (
+            select(Term)
+            .options(joinedload(Term.synonyms))
+            .where((Term.de.ilike(de.strip())) | (Term.en.ilike(en.strip())))
         )
         terms = self.session.scalars(stmt).unique().all()
 
@@ -303,9 +317,12 @@ def serialize_term(term: Term) -> dict[str, Any]:
         "en_desc": term.en_desc,
         "image": bool(term.image),
         "image_b64": base64.b64encode(term.image).decode("ascii") if term.image else "",
-        "updated_at": term.updated_at.isoformat() if isinstance(term.updated_at, datetime) else None,
+        "updated_at": (
+            term.updated_at.isoformat() if isinstance(term.updated_at, datetime) else None
+        ),
         "synonyms": [
-            {"id": s.id, "lang": s.lang, "synonym": s.synonym, "allowed": s.allowed} for s in term.synonyms
+            {"id": s.id, "lang": s.lang, "synonym": s.synonym, "allowed": s.allowed}
+            for s in term.synonyms
         ],
         "annotations": [
             {"id": a.id, "lang": a.lang, "note": a.note, "allowed": a.allowed}

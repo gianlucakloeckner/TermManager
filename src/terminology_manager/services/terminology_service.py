@@ -115,7 +115,9 @@ class TerminologyService:
 
     def search(self, query: str, include_hidden_chapters: bool = False) -> list[SearchResult]:
         with session_scope(self.session_factory) as session:
-            return TermRepository(session).search_fts(query=query, include_hidden_chapters=include_hidden_chapters)
+            return TermRepository(session).search_fts(
+                query=query, include_hidden_chapters=include_hidden_chapters
+            )
 
     def list_chapters(self) -> list[Chapter]:
         with session_scope(self.session_factory) as session:
@@ -147,7 +149,9 @@ class TerminologyService:
                 }
                 action = "update"
 
-            chapter = chapter_repo.upsert(chapter_id, name_de, name_en, visible, parent_id=parent_id)
+            chapter = chapter_repo.upsert(
+                chapter_id, name_de, name_en, visible, parent_id=parent_id
+            )
             version_repo.record(
                 entity_type="chapter",
                 entity_id=chapter.id,
@@ -209,7 +213,9 @@ class TerminologyService:
             if any(normalize(s) in syns for s in synonyms if s.strip()):
                 exact_syn_term_ids.append(candidate.id)
 
-        fuzzy_hits = find_fuzzy_matches(de, candidate_names) + find_fuzzy_matches(en, candidate_names)
+        fuzzy_hits = find_fuzzy_matches(de, candidate_names) + find_fuzzy_matches(
+            en, candidate_names
+        )
         return DuplicateReport(
             exact_term_ids=sorted(set(exact_term_ids)),
             exact_synonym_term_ids=sorted(set(exact_syn_term_ids)),
