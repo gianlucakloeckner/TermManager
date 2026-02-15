@@ -3,14 +3,25 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtCore import QObject, QRunnable, QSignalBlocker, QSize, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -22,6 +33,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -38,29 +50,77 @@ from PySide6.QtWidgets import (
 )
 
 from terminology_manager.persistence.models import Chapter
+from terminology_manager.domain.entities import SearchResult
 from terminology_manager.services.terminology_service import TerminologyService
 from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
+EDIT_MODE_PIN = os.getenv("TERM_MANAGER_EDIT_PIN", "1234")
+PIN_LENGTH = 4
+
+
+class SearchWorkerSignals(QObject):
+    finished = Signal(int, str, list)
+
+
+class SearchWorker(QRunnable):
+    def __init__(self, request_id: int, query: str, service: TerminologyService) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.query = query
+        self.service = service
+        self.signals = SearchWorkerSignals()
+
+    def run(self) -> None:
+        rows: list[SearchResult] = self.service.search(self.query, include_hidden_chapters=False)
+        payload: list[tuple[SearchResult, str]] = []
+        seen: set[int] = set()
+        for row in rows:
+            if row.term_id in seen:
+                continue
+            seen.add(row.term_id)
+            term = self.service.get_term(row.term_id) or {}
+            image_b64 = str(term.get("image_b64", "") or "")
+            payload.append((row, image_b64))
+            if len(payload) >= 25:
+                break
+        self.signals.finished.emit(self.request_id, self.query, payload)
+
 
 class ChapterDialog(QDialog):
-    def __init__(self, chapter: Chapter | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        chapter: Chapter | None = None,
+        chapters: list[Chapter] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Kapitel")
-        self.resize(360, 150)
+        self.resize(460, 220)
 
         form = QFormLayout(self)
         self.name_de = QLineEdit(self)
         self.name_en = QLineEdit(self)
         self.visible = QCheckBox("In Suche sichtbar", self)
+        self.parent_combo = QComboBox(self)
         self.visible.setChecked(True)
+        self.parent_combo.addItem("Kein Elternkapitel", None)
 
         if chapter is not None:
             self.name_de.setText(chapter.name_de)
             self.name_en.setText(chapter.name_en)
             self.visible.setChecked(chapter.visible)
 
+        for c in sorted(chapters or [], key=lambda x: x.name_de.casefold()):
+            if chapter is not None and c.id == chapter.id:
+                continue
+            label = f"{c.name_de} | {c.name_en}" if c.name_en else c.name_de
+            self.parent_combo.addItem(label, c.id)
+            if chapter is not None and chapter.parent_id == c.id:
+                self.parent_combo.setCurrentIndex(self.parent_combo.count() - 1)
+
         form.addRow("Name (DE)", self.name_de)
         form.addRow("Name (EN)", self.name_en)
+        form.addRow("Elternkapitel", self.parent_combo)
         form.addRow("", self.visible)
 
         buttons = QHBoxLayout()
@@ -72,8 +132,14 @@ class ChapterDialog(QDialog):
         buttons.addWidget(cancel)
         form.addRow(buttons)
 
-    def payload(self) -> tuple[str, str, bool]:
-        return self.name_de.text().strip(), self.name_en.text().strip(), self.visible.isChecked()
+    def payload(self) -> tuple[str, str, bool, int | None]:
+        parent_id = self.parent_combo.currentData()
+        return (
+            self.name_de.text().strip(),
+            self.name_en.text().strip(),
+            self.visible.isChecked(),
+            int(parent_id) if isinstance(parent_id, int) else None,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -89,6 +155,12 @@ class MainWindow(QMainWindow):
         self.edit_buttons: list[QPushButton] = []
         self.lock_icon = QIcon()
         self.unlock_icon = QIcon()
+        self.search_dropdown: QListWidget | None = None
+        self.search_debounce = QTimer(self)
+        self.search_debounce.setSingleShot(True)
+        self.search_debounce.timeout.connect(self._run_search_from_input)
+        self.search_pool = QThreadPool.globalInstance()
+        self.search_request_id = 0
 
         self._build_ui()
         self._refresh_all()
@@ -132,6 +204,23 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(spacer)
 
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Suche (de/en/Beschreibung/Synonyme)")
+        self.search_input.setMinimumWidth(220)
+        self.search_input.setMaximumWidth(260)
+        self.search_input.setFixedHeight(36)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self._select_first_search_result)
+        top.addWidget(self.search_input)
+
+        self.search_dropdown = QListWidget(self)
+        self.search_dropdown.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.search_dropdown.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.search_dropdown.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.search_dropdown.setIconSize(QSize(28, 28))
+        self.search_dropdown.hide()
+        self.search_dropdown.itemClicked.connect(self._on_search_result_clicked)
+
         self._load_lock_icons()
         self.lock_action = QAction("Bearbeitung entsperren", self)
         self.lock_action.setCheckable(True)
@@ -139,30 +228,24 @@ class MainWindow(QMainWindow):
         top.addAction(self.lock_action)
         self._configure_shortcuts()
 
-        root = QSplitter(self)
-        self.setCentralWidget(root)
+        main = QWidget(self)
+        main_layout = QHBoxLayout(main)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(12)
+        self.setCentralWidget(main)
 
-        left = QWidget(self)
-        left_layout = QVBoxLayout(left)
-        self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("FTS5-Suche (de/en/Beschreibung/Synonyme)")
-        self.search_input.textChanged.connect(self._search)
-        left_layout.addWidget(self.search_input)
+        left_panel = QWidget(self)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
 
-        self.result_tree = QTreeWidget(self)
-        self.result_tree.setColumnCount(3)
-        self.result_tree.setHeaderLabels(["Begriff", "Kapitel", "Rang"])
-        self.result_tree.itemSelectionChanged.connect(self._on_result_selected)
-        left_layout.addWidget(self.result_tree, 1)
+        right_panel = QWidget(self)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
-        self.snippet_browser = QTextBrowser(self)
-        self.snippet_browser.setPlaceholderText("Markierte Treffer erscheinen hier")
-        left_layout.addWidget(self.snippet_browser, 1)
-
-        right = QWidget(self)
-        right_layout = QVBoxLayout(right)
-
-        editor_top_row = QHBoxLayout()
+        main_layout.addWidget(left_panel, 2)
+        main_layout.addWidget(right_panel, 1)
 
         form = QWidget(self)
         form_layout = QFormLayout(form)
@@ -170,11 +253,15 @@ class MainWindow(QMainWindow):
         self.term_en = QLineEdit(self)
         self.term_de_desc = QTextEdit(self)
         self.term_en_desc = QTextEdit(self)
+        self.term_de.setMinimumWidth(620)
+        self.term_en.setMinimumWidth(620)
+        self.term_de_desc.setMinimumWidth(620)
+        self.term_en_desc.setMinimumWidth(620)
         form_layout.addRow("Deutsch", self.term_de)
         form_layout.addRow("Englisch", self.term_en)
         form_layout.addRow("Beschreibung (DE)", self.term_de_desc)
         form_layout.addRow("Beschreibung (EN)", self.term_en_desc)
-        editor_top_row.addWidget(form, 2)
+        left_layout.addWidget(form)
 
         image_panel = QWidget(self)
         image_panel_layout = QVBoxLayout(image_panel)
@@ -196,19 +283,38 @@ class MainWindow(QMainWindow):
         image_buttons.addWidget(self.btn_clear_image)
         image_panel_layout.addLayout(image_buttons)
         image_panel_layout.addStretch(1)
-        editor_top_row.addWidget(image_panel, 1)
+        right_layout.addWidget(image_panel)
 
-        right_layout.addLayout(editor_top_row)
+        self.chapter_filter_input = QLineEdit(self)
+        self.chapter_filter_input.setPlaceholderText("Kapitel filtern...")
+        self.chapter_filter_input.textChanged.connect(self._on_chapter_filter_changed)
+        right_layout.addWidget(QLabel("Kapitel / Unterkapitel"))
+        right_layout.addWidget(self.chapter_filter_input)
 
-        self.chapter_list = QListWidget(self)
-        right_layout.addWidget(QLabel("Kapitel"))
-        right_layout.addWidget(self.chapter_list)
+        self.chapter_list = QTreeWidget(self)
+        self.chapter_list.setColumnCount(1)
+        self.chapter_list.setHeaderLabels([" "])
+        self.chapter_list.setHeaderHidden(True)
+        self.chapter_list.header().hide()
+        self.chapter_list.header().setVisible(False)
+        self.chapter_list.header().setFixedHeight(0)
+        self.chapter_list.header().setMinimumSectionSize(0)
+        self.chapter_list.header().setDefaultSectionSize(0)
+        self.chapter_list.setRootIsDecorated(True)
+        self.chapter_list.setIndentation(18)
+        self.chapter_list.setMinimumHeight(180)
+        self.chapter_list.setAlternatingRowColors(True)
+        self.chapter_list.setUniformRowHeights(True)
+        self.chapter_list.header().setStretchLastSection(True)
+        right_layout.addWidget(self.chapter_list, 1)
 
         self.syn_table = QTableWidget(self)
         self.syn_table.setColumnCount(3)
         self.syn_table.setHorizontalHeaderLabels(["Sprache", "Synonym", "Zugelassen"])
         self.syn_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        right_layout.addWidget(QLabel("Synonyme"))
+        self.syn_table.verticalHeader().setVisible(False)
+        self.syn_table.setCornerButtonEnabled(False)
+        left_layout.addWidget(QLabel("Synonyme"))
         syn_buttons = QHBoxLayout()
         self.btn_syn_add = QPushButton("+", self)
         self.btn_syn_del = QPushButton("-", self)
@@ -217,14 +323,16 @@ class MainWindow(QMainWindow):
         syn_buttons.addWidget(self.btn_syn_add)
         syn_buttons.addWidget(self.btn_syn_del)
         syn_buttons.addStretch(1)
-        right_layout.addLayout(syn_buttons)
-        right_layout.addWidget(self.syn_table)
+        left_layout.addLayout(syn_buttons)
+        left_layout.addWidget(self.syn_table, 1)
 
         self.ann_table = QTableWidget(self)
         self.ann_table.setColumnCount(3)
         self.ann_table.setHorizontalHeaderLabels(["Sprache", "Anmerkung", "Zugelassen"])
         self.ann_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        right_layout.addWidget(QLabel("Anmerkungen"))
+        self.ann_table.verticalHeader().setVisible(False)
+        self.ann_table.setCornerButtonEnabled(False)
+        left_layout.addWidget(QLabel("Anmerkungen"))
         ann_buttons = QHBoxLayout()
         self.btn_ann_add = QPushButton("+", self)
         self.btn_ann_del = QPushButton("-", self)
@@ -233,8 +341,8 @@ class MainWindow(QMainWindow):
         ann_buttons.addWidget(self.btn_ann_add)
         ann_buttons.addWidget(self.btn_ann_del)
         ann_buttons.addStretch(1)
-        right_layout.addLayout(ann_buttons)
-        right_layout.addWidget(self.ann_table)
+        left_layout.addLayout(ann_buttons)
+        left_layout.addWidget(self.ann_table, 1)
 
         dup_row = QHBoxLayout()
         self.btn_check_duplicates = QPushButton("Duplikate prüfen", self)
@@ -243,7 +351,7 @@ class MainWindow(QMainWindow):
         self.duplicate_output.setWordWrap(True)
         dup_row.addWidget(self.btn_check_duplicates)
         dup_row.addWidget(self.duplicate_output, 1)
-        right_layout.addLayout(dup_row)
+        left_layout.addLayout(dup_row)
 
         self.edit_buttons = [
             self.btn_pick_image,
@@ -257,10 +365,6 @@ class MainWindow(QMainWindow):
         ]
         for button in self.edit_buttons:
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        root.addWidget(left)
-        root.addWidget(right)
-        root.setSizes([520, 860])
 
         self.setStatusBar(QStatusBar(self))
 
@@ -278,6 +382,16 @@ class MainWindow(QMainWindow):
             action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
             action.setStatusTip(f"{action.text()} ({sequence})")
             action.setToolTip(f"{action.text()} ({sequence})")
+
+    def _on_search_text_changed(self, _text: str) -> None:
+        # Debounce verhindert UI-Blockaden bei schnellem Tippen.
+        self.search_debounce.start(140)
+
+    def _run_search_from_input(self) -> None:
+        if not self.search_input.isVisible() or not self.search_input.isVisibleTo(self):
+            self._hide_search_dropdown()
+            return
+        self._start_search(self.search_input.text().strip())
 
     def _refresh_all(self) -> None:
         self._load_logo()
@@ -327,17 +441,53 @@ class MainWindow(QMainWindow):
 
     def _load_chapters(self, selected_ids: list[int] | None = None) -> None:
         selected = set(selected_ids or [])
+        filter_text = self.chapter_filter_input.text().strip().casefold() if hasattr(self, "chapter_filter_input") else ""
         self.chapter_list.clear()
-        for chapter in self.service.list_chapters():
-            item = QListWidgetItem(f"{chapter.name_de} | {chapter.name_en}")
-            item.setData(Qt.ItemDataRole.UserRole, chapter.id)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.CheckState.Checked if chapter.id in selected else Qt.CheckState.Unchecked
-            )
-            if not chapter.visible:
-                item.setForeground(Qt.GlobalColor.darkGray)
-            self.chapter_list.addItem(item)
+        chapters = self.service.list_chapters()
+        by_parent: dict[int | None, list[Chapter]] = {}
+        by_id: dict[int, Chapter] = {}
+        for chapter in chapters:
+            by_parent.setdefault(chapter.parent_id, []).append(chapter)
+            by_id[chapter.id] = chapter
+        for items in by_parent.values():
+            items.sort(key=lambda c: c.name_de.casefold())
+
+        visible_ids: set[int] = set()
+        if filter_text:
+            for chapter in chapters:
+                de = chapter.name_de.casefold()
+                en = chapter.name_en.casefold()
+                if filter_text in de or filter_text in en:
+                    visible_ids.add(chapter.id)
+                    parent_id = chapter.parent_id
+                    while isinstance(parent_id, int):
+                        visible_ids.add(parent_id)
+                        parent = by_id.get(parent_id)
+                        parent_id = parent.parent_id if parent is not None else None
+
+        def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+            for chapter in by_parent.get(parent_id, []):
+                if filter_text and chapter.id not in visible_ids:
+                    continue
+                text = f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                node = QTreeWidgetItem([text])
+                node.setData(0, Qt.ItemDataRole.UserRole, chapter.id)
+                node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                node.setCheckState(0, Qt.CheckState.Checked if chapter.id in selected else Qt.CheckState.Unchecked)
+                if not chapter.visible:
+                    node.setForeground(0, Qt.GlobalColor.darkGray)
+                if parent_id is None:
+                    font = QFont(node.font(0))
+                    font.setBold(True)
+                    node.setFont(0, font)
+                if parent_item is None:
+                    self.chapter_list.addTopLevelItem(node)
+                else:
+                    parent_item.addChild(node)
+                add_nodes(node, chapter.id)
+
+        add_nodes(None, None)
+        self.chapter_list.expandAll()
 
     def _set_lock_state(self, unlocked: bool) -> None:
         self.is_unlocked = unlocked
@@ -351,6 +501,7 @@ class MainWindow(QMainWindow):
             self.term_en,
             self.term_de_desc,
             self.term_en_desc,
+            self.chapter_filter_input,
             self.chapter_list,
             self.syn_table,
             self.ann_table,
@@ -371,55 +522,178 @@ class MainWindow(QMainWindow):
                 Qt.CursorShape.PointingHandCursor if unlocked else Qt.CursorShape.ForbiddenCursor
             )
 
+    def _on_chapter_filter_changed(self, _text: str) -> None:
+        selected = self._selected_chapter_ids_from_tree()
+        self._load_chapters(selected_ids=selected)
+
+    def _selected_chapter_ids_from_tree(self) -> list[int]:
+        selected: list[int] = []
+        root = self.chapter_list.invisibleRootItem()
+
+        def collect(node: QTreeWidgetItem) -> None:
+            chapter_id = node.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(chapter_id, int) and node.checkState(0) == Qt.CheckState.Checked:
+                selected.append(chapter_id)
+            for i in range(node.childCount()):
+                collect(node.child(i))
+
+        for i in range(root.childCount()):
+            collect(root.child(i))
+        return selected
+
     def _toggle_lock(self, checked: bool) -> None:
+        if checked and not self._request_edit_pin():
+            with QSignalBlocker(self.lock_action):
+                self.lock_action.setChecked(False)
+            self._set_lock_state(False)
+            self.statusBar().showMessage("Falsche PIN - Bearbeitung bleibt gesperrt", 3000)
+            return
         self._set_lock_state(checked)
         self.statusBar().showMessage("Bearbeitung entsperrt" if checked else "Bearbeitung gesperrt", 3000)
 
+    def _request_edit_pin(self) -> bool:
+        entered, ok = QInputDialog.getText(
+            self,
+            "PIN erforderlich",
+            f"Bitte {PIN_LENGTH}-stellige PIN eingeben:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return False
+        value = entered.strip()
+        if len(value) != PIN_LENGTH:
+            QMessageBox.warning(self, "Ungültige PIN", f"Die PIN muss genau {PIN_LENGTH} Zeichen lang sein.")
+            return False
+        return value == EDIT_MODE_PIN
+
     def _search(self, query: str) -> None:
-        self.result_tree.clear()
-        if not query.strip():
-            self.snippet_browser.clear()
-            for term in self.service.list_terms():
-                item = QTreeWidgetItem([f"{term['de']} / {term['en']}", "", ""])
-                item.setData(0, Qt.ItemDataRole.UserRole, term["id"])
-                self.result_tree.addTopLevelItem(item)
+        self._start_search(query.strip())
+
+    def _start_search(self, query: str) -> None:
+        if self.search_dropdown is None:
+            return
+        if not self.search_input.isVisible() or not self.search_input.isVisibleTo(self):
+            self._hide_search_dropdown()
+            return
+        if not query:
+            self.search_dropdown.clear()
+            self.search_dropdown.hide()
+            return
+        self.search_dropdown.clear()
+        self.search_dropdown.hide()
+
+        self.search_request_id += 1
+        request_id = self.search_request_id
+        worker = SearchWorker(request_id=request_id, query=query, service=self.service)
+        worker.signals.finished.connect(self._apply_search_results)
+        self.search_pool.start(worker)
+
+    def _apply_search_results(self, request_id: int, query: str, rows_with_images: list[tuple[SearchResult, str]]) -> None:
+        if self.search_dropdown is None:
+            return
+        if (
+            not self.search_input.isVisible()
+            or not self.search_input.isVisibleTo(self)
+            or not self.search_input.hasFocus()
+        ):
+            self._hide_search_dropdown()
+            return
+        if request_id != self.search_request_id:
+            return
+        if query != self.search_input.text().strip():
             return
 
-        grouped: dict[str, list[Any]] = {}
-        for row in self.service.search(query, include_hidden_chapters=False):
-            key = row.chapter_de or "(Ohne Kapitel)"
-            grouped.setdefault(key, []).append(row)
+        self.search_dropdown.clear()
+        for row, image_b64 in rows_with_images:
+            chapter = row.chapter_de or "Ohne Kapitel"
+            title = f"{row.de} / {row.en}"
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, row.term_id)
+            self.search_dropdown.addItem(item)
+            self.search_dropdown.setItemWidget(item, self._build_search_result_widget(title, chapter, image_b64))
+            item.setSizeHint(QSize(0, 68))
 
-        for chapter_name, rows in grouped.items():
-            group_item = QTreeWidgetItem([chapter_name, "", ""])
-            group_item.setFlags(group_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            self.result_tree.addTopLevelItem(group_item)
-            for row in rows:
-                item = QTreeWidgetItem([f"{row.de} / {row.en}", chapter_name, f"{row.rank:.3f}"])
-                item.setData(0, Qt.ItemDataRole.UserRole, row.term_id)
-                item.setData(1, Qt.ItemDataRole.UserRole, row)
-                group_item.addChild(item)
-            group_item.setExpanded(True)
-
-    def _on_result_selected(self) -> None:
-        items = self.result_tree.selectedItems()
-        if not items:
+        if self.search_dropdown.count() == 0:
+            self.search_dropdown.hide()
             return
-        item = items[0]
-        term_id = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(term_id, int):
-            return
-        self._load_term(term_id)
 
-        row = item.data(1, Qt.ItemDataRole.UserRole)
-        if row is not None:
-            snippet_html = (
-                f"<b>DE</b>: {html.escape(row.snippet_de)}<br>"
-                f"<b>EN</b>: {html.escape(row.snippet_en)}<br>"
-                f"<b>Synonyme</b>: {html.escape(row.snippet_synonyms)}"
-            )
-            snippet_html = snippet_html.replace("&lt;mark&gt;", "<mark>").replace("&lt;/mark&gt;", "</mark>")
-            self.snippet_browser.setHtml(snippet_html)
+        self._position_search_dropdown()
+        self.search_dropdown.setCurrentRow(0)
+        self.search_dropdown.show()
+        self.search_input.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _build_search_result_widget(self, title: str, chapter: str, image_b64: str) -> QWidget:
+        widget = QWidget(self.search_dropdown)
+        widget.setFixedHeight(60)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(6, 4, 6, 4)
+        row.setSpacing(8)
+
+        thumb_label = QLabel(widget)
+        thumb_label.setFixedSize(36, 36)
+        thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if image_b64:
+            image_bytes = base64.b64decode(image_b64)
+            pix = QPixmap()
+            if pix.loadFromData(image_bytes):
+                thumb = pix.scaled(
+                    36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                )
+                thumb_label.setPixmap(thumb)
+        row.addWidget(thumb_label)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+
+        title_label = QLabel(title, widget)
+        chapter_label = QLabel(chapter, widget)
+        ch_font = chapter_label.font()
+        ch_font.setItalic(True)
+        chapter_label.setFont(ch_font)
+        chapter_label.setStyleSheet("color: #9CA3AF;")
+
+        text_col.addWidget(title_label)
+        text_col.addWidget(chapter_label)
+        row.addLayout(text_col, 1)
+        return widget
+
+    def _position_search_dropdown(self) -> None:
+        if self.search_dropdown is None:
+            return
+        if not self.search_input.isVisible() or not self.search_input.isVisibleTo(self):
+            self._hide_search_dropdown()
+            return
+        width = self.search_input.width()
+        row_h = self.search_dropdown.sizeHintForRow(0) if self.search_dropdown.count() > 0 else 24
+        height = min(10, self.search_dropdown.count()) * row_h + 8
+        local_pos = self.search_input.mapTo(self, self.search_input.rect().bottomLeft())
+        self.search_dropdown.setGeometry(local_pos.x(), local_pos.y() + 2, width, max(120, height))
+        self.search_dropdown.raise_()
+
+    def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
+        term_id = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(term_id, int):
+            self._load_term(term_id)
+        if self.search_dropdown is not None:
+            self.search_dropdown.hide()
+
+    def _select_first_search_result(self) -> None:
+        if self.search_dropdown is None or self.search_dropdown.count() == 0:
+            return
+        item = self.search_dropdown.item(0)
+        if item is not None:
+            self._on_search_result_clicked(item)
+
+    def _hide_search_dropdown(self) -> None:
+        if self.search_dropdown is None:
+            return
+        self.search_dropdown.hide()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self.search_dropdown is not None and self.search_dropdown.isVisible():
+            self._position_search_dropdown()
 
     def _load_term(self, term_id: int) -> None:
         term = self.service.get_term(term_id)
@@ -524,10 +798,17 @@ class MainWindow(QMainWindow):
             return
 
         chapter_ids: list[int] = []
-        for idx in range(self.chapter_list.count()):
-            item = self.chapter_list.item(idx)
-            if item.checkState() == Qt.CheckState.Checked:
-                chapter_ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        root = self.chapter_list.invisibleRootItem()
+
+        def collect_checked(node: QTreeWidgetItem) -> None:
+            chapter_id = node.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(chapter_id, int) and node.checkState(0) == Qt.CheckState.Checked:
+                chapter_ids.append(chapter_id)
+            for i in range(node.childCount()):
+                collect_checked(node.child(i))
+
+        for i in range(root.childCount()):
+            collect_checked(root.child(i))
 
         term_id = self.service.save_term(
             term_id=self.current_term_id,
@@ -598,19 +879,22 @@ class MainWindow(QMainWindow):
     def _manage_chapters(self) -> None:
         if not self.is_unlocked:
             return
-        chapters = self.service.list_chapters()
         selector = QDialog(self)
         selector.setWindowTitle("Kapitel verwalten")
-        selector.resize(480, 400)
+        selector.resize(700, 520)
         layout = QVBoxLayout(selector)
-        list_widget = QListWidget(selector)
-        for chapter in chapters:
-            item = QListWidgetItem(
-                f"{chapter.name_de} | {chapter.name_en} ({'sichtbar' if chapter.visible else 'versteckt'})"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, chapter.id)
-            list_widget.addItem(item)
-        layout.addWidget(list_widget)
+        tree = QTreeWidget(selector)
+        tree.setColumnCount(1)
+        tree.setHeaderLabels([" "])
+        tree.setHeaderHidden(True)
+        tree.header().hide()
+        tree.header().setVisible(False)
+        tree.header().setFixedHeight(0)
+        tree.header().setMinimumSectionSize(0)
+        tree.header().setDefaultSectionSize(0)
+        tree.setRootIsDecorated(True)
+        tree.setIndentation(18)
+        layout.addWidget(tree)
 
         buttons = QHBoxLayout()
         b_add = QPushButton("Hinzufügen", selector)
@@ -620,39 +904,85 @@ class MainWindow(QMainWindow):
         buttons.addWidget(b_add)
         buttons.addWidget(b_edit)
         buttons.addWidget(b_delete)
+        buttons.addStretch(1)
         buttons.addWidget(b_close)
         layout.addLayout(buttons)
 
+        def refresh_tree(select_id: int | None = None) -> list[Chapter]:
+            chapters = self.service.list_chapters()
+            by_parent: dict[int | None, list[Chapter]] = {}
+            for ch in chapters:
+                by_parent.setdefault(ch.parent_id, []).append(ch)
+            for items in by_parent.values():
+                items.sort(key=lambda c: c.name_de.casefold())
+            tree.clear()
+
+            def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+                for ch in by_parent.get(parent_id, []):
+                    base = f"{ch.name_de} | {ch.name_en}" if ch.name_en else ch.name_de
+                    label = f"{base} ({'sichtbar' if ch.visible else 'versteckt'})"
+                    node = QTreeWidgetItem([label])
+                    node.setData(0, Qt.ItemDataRole.UserRole, ch.id)
+                    if not ch.visible:
+                        node.setForeground(0, Qt.GlobalColor.darkGray)
+                    if parent_item is None:
+                        tree.addTopLevelItem(node)
+                    else:
+                        parent_item.addChild(node)
+                    if select_id is not None and ch.id == select_id:
+                        tree.setCurrentItem(node)
+                    add_nodes(node, ch.id)
+
+            add_nodes(None, None)
+            tree.expandAll()
+            return chapters
+
+        chapters_cache = refresh_tree()
+
         def add_chapter() -> None:
-            dlg = ChapterDialog(parent=selector)
+            dlg = ChapterDialog(chapters=chapters_cache, parent=selector)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
-            name_de, name_en, visible = dlg.payload()
-            self.service.save_chapter(None, name_de, name_en, visible)
-            selector.accept()
+            name_de, name_en, visible, parent_id = dlg.payload()
+            new_id = self.service.save_chapter(None, name_de, name_en, visible, parent_id=parent_id)
+            nonlocal_chapters_refresh(new_id)
 
         def edit_chapter() -> None:
-            item = list_widget.currentItem()
-            if item is None:
+            current = tree.currentItem()
+            if current is None:
                 return
-            chapter_id = int(item.data(Qt.ItemDataRole.UserRole))
-            chapter = next((c for c in chapters if c.id == chapter_id), None)
+            chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(chapter_id, int):
+                return
+            chapter = next((c for c in chapters_cache if c.id == chapter_id), None)
             if chapter is None:
                 return
-            dlg = ChapterDialog(chapter=chapter, parent=selector)
+            dlg = ChapterDialog(chapter=chapter, chapters=chapters_cache, parent=selector)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
-            name_de, name_en, visible = dlg.payload()
-            self.service.save_chapter(chapter_id, name_de, name_en, visible)
-            selector.accept()
+            name_de, name_en, visible, parent_id = dlg.payload()
+            self.service.save_chapter(chapter_id, name_de, name_en, visible, parent_id=parent_id)
+            nonlocal_chapters_refresh(chapter_id)
 
         def delete_chapter() -> None:
-            item = list_widget.currentItem()
-            if item is None:
+            current = tree.currentItem()
+            if current is None:
                 return
-            chapter_id = int(item.data(Qt.ItemDataRole.UserRole))
+            chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(chapter_id, int):
+                return
+            if QMessageBox.question(
+                selector, "Kapitel löschen", "Kapitel (inkl. Unterkapitel) wirklich löschen?"
+            ) != QMessageBox.StandardButton.Yes:
+                return
             self.service.delete_chapter(chapter_id)
-            selector.accept()
+            nonlocal_chapters_refresh()
+
+        def nonlocal_chapters_refresh(select_id: int | None = None) -> None:
+            nonlocal chapters_cache
+            chapters_cache = refresh_tree(select_id)
+            self._load_chapters()
+            self._search(self.search_input.text())
 
         b_add.clicked.connect(add_chapter)
         b_edit.clicked.connect(edit_chapter)
@@ -660,8 +990,6 @@ class MainWindow(QMainWindow):
         b_close.clicked.connect(selector.reject)
 
         selector.exec()
-        self._load_chapters()
-        self._search(self.search_input.text())
 
     def _check_duplicates(self) -> None:
         synonyms = [

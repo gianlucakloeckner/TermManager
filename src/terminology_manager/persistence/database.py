@@ -25,6 +25,17 @@ def create_sqlite_engine(database_url: str) -> Engine:
 def initialize_database(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        chapter_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(chapters)")).fetchall()]
+        if "parent_id" not in chapter_cols:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE chapters
+                    ADD COLUMN parent_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL
+                    """
+                )
+            )
+
         conn.execute(
             text(
                 """

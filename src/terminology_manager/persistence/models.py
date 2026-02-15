@@ -75,8 +75,15 @@ class Chapter(Base):
     name_de: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     name_en: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True
+    )
 
     terms: Mapped[list[TermChapter]] = relationship(back_populates="chapter", cascade="all, delete-orphan")
+    parent: Mapped[Chapter | None] = relationship(
+        "Chapter", remote_side="Chapter.id", back_populates="children"
+    )
+    children: Mapped[list[Chapter]] = relationship("Chapter", back_populates="parent")
 
 
 class TermChapter(Base):

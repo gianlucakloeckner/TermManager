@@ -85,9 +85,23 @@ class ChapterRepository:
     def get(self, chapter_id: int) -> Chapter | None:
         return self.session.get(Chapter, chapter_id)
 
-    def upsert(self, chapter_id: int | None, name_de: str, name_en: str, visible: bool) -> Chapter:
+    def upsert(
+        self,
+        chapter_id: int | None,
+        name_de: str,
+        name_en: str,
+        visible: bool,
+        parent_id: int | None = None,
+    ) -> Chapter:
+        if chapter_id is not None and parent_id == chapter_id:
+            raise ValueError("chapter cannot be parent of itself")
         if chapter_id is None:
-            chapter = Chapter(name_de=name_de.strip(), name_en=name_en.strip(), visible=visible)
+            chapter = Chapter(
+                name_de=name_de.strip(),
+                name_en=name_en.strip(),
+                visible=visible,
+                parent_id=parent_id,
+            )
             self.session.add(chapter)
             self.session.flush()
             return chapter
@@ -97,6 +111,7 @@ class ChapterRepository:
         chapter.name_de = name_de.strip()
         chapter.name_en = name_en.strip()
         chapter.visible = visible
+        chapter.parent_id = parent_id
         self.session.flush()
         return chapter
 

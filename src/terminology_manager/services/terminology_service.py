@@ -121,7 +121,14 @@ class TerminologyService:
         with session_scope(self.session_factory) as session:
             return ChapterRepository(session).list_all()
 
-    def save_chapter(self, chapter_id: int | None, name_de: str, name_en: str, visible: bool) -> int:
+    def save_chapter(
+        self,
+        chapter_id: int | None,
+        name_de: str,
+        name_en: str,
+        visible: bool,
+        parent_id: int | None = None,
+    ) -> int:
         with session_scope(self.session_factory) as session:
             chapter_repo = ChapterRepository(session)
             version_repo = VersionRepository(session)
@@ -136,10 +143,11 @@ class TerminologyService:
                     "name_de": chapter.name_de,
                     "name_en": chapter.name_en,
                     "visible": chapter.visible,
+                    "parent_id": chapter.parent_id,
                 }
                 action = "update"
 
-            chapter = chapter_repo.upsert(chapter_id, name_de, name_en, visible)
+            chapter = chapter_repo.upsert(chapter_id, name_de, name_en, visible, parent_id=parent_id)
             version_repo.record(
                 entity_type="chapter",
                 entity_id=chapter.id,
@@ -150,6 +158,7 @@ class TerminologyService:
                     "name_de": chapter.name_de,
                     "name_en": chapter.name_en,
                     "visible": chapter.visible,
+                    "parent_id": chapter.parent_id,
                 },
             )
             return chapter.id
@@ -166,6 +175,7 @@ class TerminologyService:
                 "name_de": chapter.name_de,
                 "name_en": chapter.name_en,
                 "visible": chapter.visible,
+                "parent_id": chapter.parent_id,
             }
             chapter_repo.delete(chapter_id)
             version_repo.record(
