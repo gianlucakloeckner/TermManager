@@ -7,7 +7,16 @@ import os
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QSignalBlocker, QSize, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QObject,
+    QRunnable,
+    QSignalBlocker,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -27,14 +36,15 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QInputDialog,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -46,11 +56,10 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QSizePolicy,
 )
 
-from terminology_manager.persistence.models import Chapter
 from terminology_manager.domain.entities import SearchResult
+from terminology_manager.persistence.models import Chapter
 from terminology_manager.services.terminology_service import TerminologyService
 from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
@@ -690,7 +699,7 @@ class MainWindow(QMainWindow):
             return
         self.search_dropdown.hide()
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self.search_dropdown is not None and self.search_dropdown.isVisible():
             self._position_search_dropdown()
