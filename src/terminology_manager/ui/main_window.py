@@ -444,6 +444,7 @@ class MainWindow(QMainWindow):
 
         visible_chapter_ids: set[int] = set()
         if chapter_filter:
+
             def mark_descendants(chapter_id: int) -> None:
                 for child in by_parent.get(chapter_id, []):
                     if child.id in visible_chapter_ids:
@@ -484,12 +485,16 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self.sidebar_term_tree):
             self.sidebar_term_tree.clear()
 
-            def add_chapter_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+            def add_chapter_nodes(
+                parent_item: QTreeWidgetItem | None, parent_id: int | None
+            ) -> None:
                 for chapter in by_parent.get(parent_id, []):
                     if chapter_filter and chapter.id not in visible_chapter_ids:
                         continue
                     chapter_text = (
-                        f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                        f"{chapter.name_de} | {chapter.name_en}"
+                        if chapter.name_en
+                        else chapter.name_de
                     )
                     chapter_item = QTreeWidgetItem([chapter_text])
                     chapter_item.setData(0, Qt.ItemDataRole.UserRole, None)
@@ -601,6 +606,7 @@ class MainWindow(QMainWindow):
 
         visible_ids: set[int] = set()
         if filter_text:
+
             def mark_descendants(chapter_id: int) -> None:
                 for child in by_parent.get(chapter_id, []):
                     if child.id in visible_ids:
@@ -829,7 +835,9 @@ class MainWindow(QMainWindow):
                 self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
                 self.config.save()
             except OSError as exc:
-                QMessageBox.critical(dlg, "Fehler", f"Einstellungen konnten nicht gespeichert werden:\n{exc}")
+                QMessageBox.critical(
+                    dlg, "Fehler", f"Einstellungen konnten nicht gespeichert werden:\n{exc}"
+                )
                 return
 
             messages: list[str] = []
@@ -1346,9 +1354,7 @@ class MainWindow(QMainWindow):
             confirm.setIcon(QMessageBox.Icon.Warning)
             confirm.setWindowTitle("Kapitel löschen")
             confirm.setText("Kapitel und alle Unterkapitel wirklich löschen?")
-            confirm.setInformativeText(
-                "Wie sollen die zugeordneten Begriffe behandelt werden?"
-            )
+            confirm.setInformativeText("Wie sollen die zugeordneten Begriffe behandelt werden?")
             with_terms_btn = confirm.addButton(
                 "Mit Begriffen löschen", QMessageBox.ButtonRole.DestructiveRole
             )
@@ -1452,7 +1458,9 @@ class MainWindow(QMainWindow):
             def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
                 for chapter in by_parent.get(parent_id, []):
                     text = (
-                        f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                        f"{chapter.name_de} | {chapter.name_en}"
+                        if chapter.name_en
+                        else chapter.name_de
                     )
                     node = QTreeWidgetItem([text])
                     node.setData(0, Qt.ItemDataRole.UserRole, chapter.id)
@@ -1493,7 +1501,9 @@ class MainWindow(QMainWindow):
         def assign_chapters() -> None:
             ids = selected_term_ids()
             if not ids:
-                QMessageBox.warning(dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen.")
+                QMessageBox.warning(
+                    dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen."
+                )
                 return
             chapter_ids = selected_chapter_ids()
             for term_id in ids:
@@ -1527,7 +1537,9 @@ class MainWindow(QMainWindow):
         def delete_terms() -> None:
             ids = selected_term_ids()
             if not ids:
-                QMessageBox.warning(dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen.")
+                QMessageBox.warning(
+                    dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen."
+                )
                 return
             if (
                 QMessageBox.question(
