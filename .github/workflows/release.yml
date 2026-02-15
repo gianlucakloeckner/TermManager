@@ -33,7 +33,12 @@ jobs:
       - name: Install
         run: uv sync --frozen --extra dev
 
-      - name: Build app
+      - name: Build app (macOS)
+        if: runner.os == 'macOS'
+        run: uv run pyinstaller --name TerminologyManager --windowed src/terminology_manager/main.py
+
+      - name: Build app (Windows)
+        if: runner.os == 'Windows'
         run: uv run pyinstaller --name TerminologyManager --windowed --onefile src/terminology_manager/main.py
 
       - name: Archive artifacts (macOS)
