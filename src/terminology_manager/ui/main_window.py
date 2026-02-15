@@ -243,6 +243,32 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(12)
         self.setCentralWidget(main)
 
+        sidebar = QWidget(self)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(8)
+        sidebar_layout.addWidget(QLabel("Kapitel / Begriffe"))
+
+        self.sidebar_tree_filter_input = QLineEdit(self)
+        self.sidebar_tree_filter_input.setPlaceholderText("Kapitel filtern...")
+        self.sidebar_tree_filter_input.textChanged.connect(self._on_sidebar_chapter_filter_changed)
+        sidebar_layout.addWidget(self.sidebar_tree_filter_input)
+
+        self.sidebar_term_tree = QTreeWidget(self)
+        self.sidebar_term_tree.setColumnCount(1)
+        self.sidebar_term_tree.setHeaderHidden(True)
+        self.sidebar_term_tree.setRootIsDecorated(True)
+        self.sidebar_term_tree.setIndentation(16)
+        self.sidebar_term_tree.itemSelectionChanged.connect(self._on_sidebar_term_selected)
+        sidebar_layout.addWidget(self.sidebar_term_tree, 1)
+        main_layout.addWidget(sidebar, 1)
+
+        content = QWidget(self)
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        main_layout.addWidget(content, 4)
+
         left_panel = QWidget(self)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -253,8 +279,8 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        main_layout.addWidget(left_panel, 2)
-        main_layout.addWidget(right_panel, 1)
+        content_layout.addWidget(left_panel, 2)
+        content_layout.addWidget(right_panel, 1)
 
         form = QWidget(self)
         form_layout = QFormLayout(form)
@@ -266,6 +292,8 @@ class MainWindow(QMainWindow):
         self.term_en.setMinimumWidth(620)
         self.term_de_desc.setMinimumWidth(620)
         self.term_en_desc.setMinimumWidth(620)
+        self.term_de_desc.setMaximumHeight(90)
+        self.term_en_desc.setMaximumHeight(90)
         form_layout.addRow("Deutsch", self.term_de)
         form_layout.addRow("Englisch", self.term_en)
         form_layout.addRow("Beschreibung (DE)", self.term_de_desc)
@@ -409,7 +437,137 @@ class MainWindow(QMainWindow):
     def _refresh_all(self) -> None:
         self._load_logo()
         self._load_chapters()
+        self._refresh_term_sidebar()
         self._search(self.search_input.text())
+
+    def _refresh_term_sidebar(self) -> None:
+        chapter_filter = self.sidebar_tree_filter_input.text().strip().casefold()
+        selected_term_id = self.current_term_id
+        chapters = self.service.list_chapters()
+        by_parent: dict[int | None, list[Chapter]] = {}
+        by_id: dict[int, Chapter] = {}
+        for chapter in chapters:
+            by_parent.setdefault(chapter.parent_id, []).append(chapter)
+            by_id[chapter.id] = chapter
+        for items in by_parent.values():
+            items.sort(key=lambda c: c.name_de.casefold())
+
+        visible_chapter_ids: set[int] = set()
+        if chapter_filter:
+            def mark_descendants(chapter_id: int) -> None:
+                for child in by_parent.get(chapter_id, []):
+                    if child.id in visible_chapter_ids:
+                        continue
+                    visible_chapter_ids.add(child.id)
+                    mark_descendants(child.id)
+
+            for chapter in chapters:
+                de = chapter.name_de.casefold()
+                en = chapter.name_en.casefold()
+                if chapter_filter in de or chapter_filter in en:
+                    visible_chapter_ids.add(chapter.id)
+                    mark_descendants(chapter.id)
+                    parent_id = chapter.parent_id
+                    while isinstance(parent_id, int):
+                        visible_chapter_ids.add(parent_id)
+                        parent = by_id.get(parent_id)
+                        parent_id = parent.parent_id if parent is not None else None
+
+        terms_by_chapter: dict[int, list[tuple[int, str]]] = {}
+        terms_without_chapter: list[tuple[int, str]] = []
+        terms = self.service.list_terms()
+        for term in sorted(terms, key=lambda t: str(t.get("de", "")).casefold()):
+            term_id_raw = term.get("id")
+            if not isinstance(term_id_raw, int):
+                continue
+            raw_chapter_ids = term.get("chapter_ids", [])
+            if not isinstance(raw_chapter_ids, list):
+                raw_chapter_ids = []
+            chapter_ids = [cid for cid in raw_chapter_ids if isinstance(cid, int)]
+            title = f"{term.get('de', '')} | {term.get('en', '')}".strip()
+            if not chapter_ids:
+                terms_without_chapter.append((term_id_raw, title))
+                continue
+            for chapter_id in chapter_ids:
+                terms_by_chapter.setdefault(chapter_id, []).append((term_id_raw, title))
+
+        with QSignalBlocker(self.sidebar_term_tree):
+            self.sidebar_term_tree.clear()
+
+            def add_chapter_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+                for chapter in by_parent.get(parent_id, []):
+                    if chapter_filter and chapter.id not in visible_chapter_ids:
+                        continue
+                    chapter_text = (
+                        f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                    )
+                    chapter_item = QTreeWidgetItem([chapter_text])
+                    chapter_item.setData(0, Qt.ItemDataRole.UserRole, None)
+                    font = QFont(chapter_item.font(0))
+                    font.setBold(True)
+                    chapter_item.setFont(0, font)
+                    if parent_item is None:
+                        self.sidebar_term_tree.addTopLevelItem(chapter_item)
+                    else:
+                        parent_item.addChild(chapter_item)
+
+                    for term_id, title in terms_by_chapter.get(chapter.id, []):
+                        term_item = QTreeWidgetItem([title])
+                        term_item.setData(0, Qt.ItemDataRole.UserRole, term_id)
+                        chapter_item.addChild(term_item)
+
+                    add_chapter_nodes(chapter_item, chapter.id)
+
+            add_chapter_nodes(None, None)
+
+            show_uncategorized = not chapter_filter or "ohne kapitel".find(chapter_filter) >= 0
+            if show_uncategorized:
+                uncategorized = QTreeWidgetItem(["Ohne Kapitel"])
+                unc_font = QFont(uncategorized.font(0))
+                unc_font.setBold(True)
+                uncategorized.setFont(0, unc_font)
+                self.sidebar_term_tree.addTopLevelItem(uncategorized)
+                for term_id, title in terms_without_chapter:
+                    term_item = QTreeWidgetItem([title])
+                    term_item.setData(0, Qt.ItemDataRole.UserRole, term_id)
+                    uncategorized.addChild(term_item)
+
+            self.sidebar_term_tree.expandAll()
+            if isinstance(selected_term_id, int):
+                selected_item = self._find_sidebar_term_item(selected_term_id)
+                if selected_item is not None:
+                    self.sidebar_term_tree.setCurrentItem(selected_item)
+
+    def _find_sidebar_term_item(self, term_id: int) -> QTreeWidgetItem | None:
+        def search(node: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            data = node.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(data, int) and data == term_id:
+                return node
+            for i in range(node.childCount()):
+                hit = search(node.child(i))
+                if hit is not None:
+                    return hit
+            return None
+
+        for i in range(self.sidebar_term_tree.topLevelItemCount()):
+            top = self.sidebar_term_tree.topLevelItem(i)
+            if top is None:
+                continue
+            found = search(top)
+            if found is not None:
+                return found
+        return None
+
+    def _on_sidebar_chapter_filter_changed(self, _text: str) -> None:
+        self._refresh_term_sidebar()
+
+    def _on_sidebar_term_selected(self) -> None:
+        current = self.sidebar_term_tree.currentItem()
+        if current is None:
+            return
+        term_id = current.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(term_id, int) and term_id != self.current_term_id:
+            self._load_term(term_id)
 
     def _load_lock_icons(self) -> None:
         assets_dir = Path(__file__).resolve().parents[1] / "assets"
@@ -476,11 +634,19 @@ class MainWindow(QMainWindow):
 
         visible_ids: set[int] = set()
         if filter_text:
+            def mark_descendants(chapter_id: int) -> None:
+                for child in by_parent.get(chapter_id, []):
+                    if child.id in visible_ids:
+                        continue
+                    visible_ids.add(child.id)
+                    mark_descendants(child.id)
+
             for chapter in chapters:
                 de = chapter.name_de.casefold()
                 en = chapter.name_en.casefold()
                 if filter_text in de or filter_text in en:
                     visible_ids.add(chapter.id)
+                    mark_descendants(chapter.id)
                     parent_id = chapter.parent_id
                     while isinstance(parent_id, int):
                         visible_ids.add(parent_id)
@@ -738,6 +904,10 @@ class MainWindow(QMainWindow):
             return
 
         self.current_term_id = term_id
+        with QSignalBlocker(self.sidebar_term_tree):
+            item = self._find_sidebar_term_item(term_id)
+            if item is not None:
+                self.sidebar_term_tree.setCurrentItem(item)
         self.term_de.setText(term["de"])
         self.term_en.setText(term["en"])
         self.term_de_desc.setPlainText(term["de_desc"])
@@ -824,6 +994,8 @@ class MainWindow(QMainWindow):
         if not self.is_unlocked:
             return
         self.current_term_id = None
+        with QSignalBlocker(self.sidebar_term_tree):
+            self.sidebar_term_tree.clearSelection()
         self.current_image_bytes = None
         self.term_de.clear()
         self.term_en.clear()
@@ -872,6 +1044,7 @@ class MainWindow(QMainWindow):
 
         self.current_term_id = term_id
         self.statusBar().showMessage("Begriff gespeichert", 3000)
+        self._refresh_term_sidebar()
         self._search(self.search_input.text())
 
     def _delete_term(self) -> None:
@@ -885,6 +1058,7 @@ class MainWindow(QMainWindow):
         self.service.delete_term(self.current_term_id)
         self.statusBar().showMessage("Begriff gelöscht", 3000)
         self._new_term()
+        self._refresh_term_sidebar()
         self._search(self.search_input.text())
 
     def _pick_image(self) -> None:
@@ -1036,6 +1210,7 @@ class MainWindow(QMainWindow):
             nonlocal chapters_cache
             chapters_cache = refresh_tree(select_id)
             self._load_chapters()
+            self._refresh_term_sidebar()
             self._search(self.search_input.text())
 
         b_add.clicked.connect(add_chapter)
@@ -1287,6 +1462,7 @@ class MainWindow(QMainWindow):
             return
         count = self.service.import_file(Path(path))
         self.statusBar().showMessage(f"{count} Begriffe importiert", 5000)
+        self._refresh_term_sidebar()
         self._search(self.search_input.text())
 
     def _export_file(self) -> None:
