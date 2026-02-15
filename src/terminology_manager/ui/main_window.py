@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import html
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -58,12 +58,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from terminology_manager.config import AppConfig
 from terminology_manager.domain.entities import SearchResult
 from terminology_manager.persistence.models import Chapter
 from terminology_manager.services.terminology_service import TerminologyService
 from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
-EDIT_MODE_PIN = os.getenv("TERM_MANAGER_EDIT_PIN", "1234")
 PIN_LENGTH = 4
 
 
@@ -81,7 +81,7 @@ class SearchWorker(QRunnable):
 
     def run(self) -> None:
         rows: list[SearchResult] = self.service.search(self.query, include_hidden_chapters=False)
-        payload: list[tuple[SearchResult, str]] = []
+        payload: list[tuple[SearchResult, str, str]] = []
         seen: set[int] = set()
         for row in rows:
             if row.term_id in seen:
@@ -89,7 +89,8 @@ class SearchWorker(QRunnable):
             seen.add(row.term_id)
             term = self.service.get_term(row.term_id) or {}
             image_b64 = str(term.get("image_b64", "") or "")
-            payload.append((row, image_b64))
+            de_desc = str(term.get("de_desc", "") or "")
+            payload.append((row, image_b64, de_desc))
             if len(payload) >= 25:
                 break
         self.signals.finished.emit(self.request_id, self.query, payload)
@@ -152,9 +153,10 @@ class ChapterDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service: TerminologyService) -> None:
+    def __init__(self, service: TerminologyService, config: AppConfig) -> None:
         super().__init__()
         self.service = service
+        self.config = config
         self.setWindowTitle("Terminologie-Manager")
         self.resize(1380, 860)
 
@@ -174,39 +176,32 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_all()
         self._set_lock_state(False)
+        self._ensure_edit_pin_in_db()
 
     def _build_ui(self) -> None:
         top = QToolBar("Menü")
         top.setMovable(False)
         self.addToolBar(top)
 
-        self.logo_label = QLabel(self)
-        self.logo_label.setMinimumWidth(150)
-        top.addWidget(self.logo_label)
-
         top.addSeparator()
         self.btn_new = QAction("Neuer Begriff", self)
         self.btn_save = QAction("Speichern", self)
         self.btn_delete = QAction("Löschen", self)
+        self.btn_batch_edit = QAction("Batch bearbeiten", self)
         self.btn_manage_chapters = QAction("Kapitel verwalten", self)
         self.btn_history = QAction("Historie", self)
+        self.btn_settings = QAction("Einstellungen", self)
         for action, slot in [
             (self.btn_new, self._new_term),
             (self.btn_save, self._save_term),
             (self.btn_delete, self._delete_term),
+            (self.btn_batch_edit, self._open_batch_edit),
             (self.btn_manage_chapters, self._manage_chapters),
             (self.btn_history, self._show_history),
+            (self.btn_settings, self._open_settings),
         ]:
             action.triggered.connect(slot)
             top.addAction(action)
-
-        top.addSeparator()
-        self.btn_import = QAction("Importieren", self)
-        self.btn_export = QAction("Exportieren", self)
-        self.btn_import.triggered.connect(self._import_file)
-        self.btn_export.triggered.connect(self._export_file)
-        top.addAction(self.btn_import)
-        top.addAction(self.btn_export)
 
         # Spacer drückt die Bearbeitungs-Sperre an den rechten Rand der Toolbar.
         spacer = QWidget(self)
@@ -346,18 +341,20 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.chapter_list, 1)
 
         self.syn_table = QTableWidget(self)
-        self.syn_table.setColumnCount(3)
-        self.syn_table.setHorizontalHeaderLabels(["Sprache", "Synonym", "Zugelassen"])
-        self.syn_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.syn_table.setColumnCount(2)
+        self.syn_table.setHorizontalHeaderLabels(["Synonym", "Zugelassen"])
+        self.syn_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.syn_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.syn_table.setColumnWidth(1, 44)
         self.syn_table.verticalHeader().setVisible(False)
         self.syn_table.setCornerButtonEnabled(False)
         left_layout.addWidget(QLabel("Synonyme"))
         syn_buttons = QHBoxLayout()
         self.btn_syn_add = QPushButton("+", self)
         self.btn_syn_del = QPushButton("-", self)
-        self.btn_syn_add.clicked.connect(
-            lambda: self._append_table_row(self.syn_table, ["de", "", "1"])
-        )
+        self.btn_syn_add.clicked.connect(lambda: self._append_table_row(self.syn_table, ["", "1"]))
         self.btn_syn_del.clicked.connect(lambda: self._remove_selected_table_row(self.syn_table))
         syn_buttons.addWidget(self.btn_syn_add)
         syn_buttons.addWidget(self.btn_syn_del)
@@ -366,33 +363,26 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.syn_table, 1)
 
         self.ann_table = QTableWidget(self)
-        self.ann_table.setColumnCount(3)
-        self.ann_table.setHorizontalHeaderLabels(["Sprache", "Anmerkung", "Zugelassen"])
-        self.ann_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.ann_table.setColumnCount(2)
+        self.ann_table.setHorizontalHeaderLabels(["Anmerkung", "Zugelassen"])
+        self.ann_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.ann_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.ann_table.setColumnWidth(1, 44)
         self.ann_table.verticalHeader().setVisible(False)
         self.ann_table.setCornerButtonEnabled(False)
         left_layout.addWidget(QLabel("Anmerkungen"))
         ann_buttons = QHBoxLayout()
         self.btn_ann_add = QPushButton("+", self)
         self.btn_ann_del = QPushButton("-", self)
-        self.btn_ann_add.clicked.connect(
-            lambda: self._append_table_row(self.ann_table, ["de", "", "1"])
-        )
+        self.btn_ann_add.clicked.connect(lambda: self._append_table_row(self.ann_table, ["", "1"]))
         self.btn_ann_del.clicked.connect(lambda: self._remove_selected_table_row(self.ann_table))
         ann_buttons.addWidget(self.btn_ann_add)
         ann_buttons.addWidget(self.btn_ann_del)
         ann_buttons.addStretch(1)
         left_layout.addLayout(ann_buttons)
         left_layout.addWidget(self.ann_table, 1)
-
-        dup_row = QHBoxLayout()
-        self.btn_check_duplicates = QPushButton("Duplikate prüfen", self)
-        self.btn_check_duplicates.clicked.connect(self._check_duplicates)
-        self.duplicate_output = QLabel("", self)
-        self.duplicate_output.setWordWrap(True)
-        dup_row.addWidget(self.btn_check_duplicates)
-        dup_row.addWidget(self.duplicate_output, 1)
-        left_layout.addLayout(dup_row)
 
         self.edit_buttons = [
             self.btn_pick_image,
@@ -402,7 +392,6 @@ class MainWindow(QMainWindow):
             self.btn_syn_del,
             self.btn_ann_add,
             self.btn_ann_del,
-            self.btn_check_duplicates,
         ]
         for button in self.edit_buttons:
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -415,8 +404,10 @@ class MainWindow(QMainWindow):
             (self.btn_new, "Ctrl+N"),
             (self.btn_save, "Ctrl+S"),
             (self.btn_delete, "Ctrl+R"),
+            (self.btn_batch_edit, "Ctrl+B"),
             (self.btn_manage_chapters, "Ctrl+K"),
             (self.btn_history, "Ctrl+H"),
+            (self.btn_settings, "Ctrl+,"),
         ]
         for action, sequence in shortcut_map:
             action.setShortcut(QKeySequence(sequence))
@@ -435,7 +426,6 @@ class MainWindow(QMainWindow):
         self._start_search(self.search_input.text().strip())
 
     def _refresh_all(self) -> None:
-        self._load_logo()
         self._load_chapters()
         self._refresh_term_sidebar()
         self._search(self.search_input.text())
@@ -592,29 +582,6 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
-    def _load_logo(self) -> None:
-        logo_path = Path(__file__).resolve().parents[1] / "assets" / "k&z_logo.svg"
-        if not logo_path.exists():
-            self.logo_label.setText("Terminologie-Manager")
-            return
-        renderer = QSvgRenderer(str(logo_path))
-        if not renderer.isValid():
-            self.logo_label.setText("Terminologie-Manager")
-            return
-        pix = QPixmap(220, 64)
-        pix.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pix)
-        renderer.render(painter)
-        painter.end()
-        self.logo_label.setPixmap(
-            pix.scaled(
-                140,
-                42,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
-
     def _load_chapters(self, selected_ids: list[int] | None = None) -> None:
         selected = set(selected_ids or [])
         filter_text = (
@@ -704,8 +671,8 @@ class MainWindow(QMainWindow):
             self.btn_new,
             self.btn_save,
             self.btn_delete,
+            self.btn_batch_edit,
             self.btn_manage_chapters,
-            self.btn_import,
         ]:
             action.setEnabled(unlocked)
         for button in self.edit_buttons:
@@ -760,7 +727,123 @@ class MainWindow(QMainWindow):
                 self, "Ungültige PIN", f"Die PIN muss genau {PIN_LENGTH} Zeichen lang sein."
             )
             return False
-        return value == EDIT_MODE_PIN
+        current_pin = self.service.get_edit_pin() or self.config.edit_pin
+        return value == current_pin
+
+    def _ensure_edit_pin_in_db(self) -> None:
+        current_pin = self.service.get_edit_pin()
+        if not current_pin:
+            self.service.set_edit_pin(self.config.edit_pin)
+
+    def _open_settings(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Einstellungen")
+        dlg.resize(620, 260)
+        layout = QVBoxLayout(dlg)
+
+        form = QFormLayout()
+        db_path_input = QLineEdit(str(self.config.database_path), dlg)
+        db_browse_btn = QPushButton("Durchsuchen", dlg)
+        db_row = QHBoxLayout()
+        db_row.addWidget(db_path_input, 1)
+        db_row.addWidget(db_browse_btn)
+        db_row_widget = QWidget(dlg)
+        db_row_widget.setLayout(db_row)
+        form.addRow("Datenbank-Datei", db_row_widget)
+
+        current_pin_input = QLineEdit(dlg)
+        current_pin_input.setEchoMode(QLineEdit.EchoMode.Password)
+        new_pin_input = QLineEdit(dlg)
+        new_pin_input.setEchoMode(QLineEdit.EchoMode.Password)
+        confirm_pin_input = QLineEdit(dlg)
+        confirm_pin_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Aktuelle PIN", current_pin_input)
+        form.addRow("Neue PIN", new_pin_input)
+        form.addRow("PIN bestätigen", confirm_pin_input)
+
+        hint = QLabel("PIN muss genau 4 Zeichen haben.", dlg)
+        hint.setStyleSheet("color: #9CA3AF;")
+        form.addRow("", hint)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        btn_save = QPushButton("Speichern", dlg)
+        btn_cancel = QPushButton("Abbrechen", dlg)
+        buttons.addStretch(1)
+        buttons.addWidget(btn_save)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+
+        def browse_db_path() -> None:
+            path, _ = QFileDialog.getSaveFileName(
+                dlg,
+                "Datenbank-Datei auswählen",
+                db_path_input.text().strip() or str(self.config.database_path),
+                "SQLite (*.sqlite3 *.db);;Alle Dateien (*)",
+            )
+            if path:
+                db_path_input.setText(path)
+
+        def save_settings() -> None:
+            db_text = db_path_input.text().strip()
+            if not db_text:
+                QMessageBox.warning(dlg, "Ungültiger Pfad", "Bitte einen Datenbank-Pfad angeben.")
+                return
+            new_db_path = Path(db_text).expanduser()
+
+            current_pin = current_pin_input.text().strip()
+            new_pin = new_pin_input.text().strip()
+            confirm_pin = confirm_pin_input.text().strip()
+            wants_pin_change = bool(current_pin or new_pin or confirm_pin)
+            db_pin = self.service.get_edit_pin() or self.config.edit_pin
+            if wants_pin_change:
+                if current_pin != db_pin:
+                    QMessageBox.warning(dlg, "Ungültige PIN", "Die aktuelle PIN ist falsch.")
+                    return
+                if len(new_pin) != PIN_LENGTH:
+                    QMessageBox.warning(
+                        dlg,
+                        "Ungültige PIN",
+                        f"Die neue PIN muss genau {PIN_LENGTH} Zeichen lang sein.",
+                    )
+                    return
+                if new_pin != confirm_pin:
+                    QMessageBox.warning(
+                        dlg,
+                        "Ungültige PIN",
+                        "Neue PIN und Bestätigung stimmen nicht überein.",
+                    )
+                    return
+
+            db_changed = new_db_path != self.config.database_path
+            pin_changed = wants_pin_change and new_pin != db_pin
+            if not db_changed and not pin_changed:
+                dlg.accept()
+                return
+
+            self.config.database_path = new_db_path
+            if pin_changed:
+                self.service.set_edit_pin(new_pin)
+
+            try:
+                self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
+                self.config.save()
+            except OSError as exc:
+                QMessageBox.critical(dlg, "Fehler", f"Einstellungen konnten nicht gespeichert werden:\n{exc}")
+                return
+
+            messages: list[str] = []
+            if pin_changed:
+                messages.append("PIN wurde aktualisiert.")
+            if db_changed:
+                messages.append("Datenbankpfad wurde aktualisiert. Neustart erforderlich.")
+            QMessageBox.information(dlg, "Einstellungen gespeichert", "\n".join(messages))
+            dlg.accept()
+
+        db_browse_btn.clicked.connect(browse_db_path)
+        btn_save.clicked.connect(save_settings)
+        btn_cancel.clicked.connect(dlg.reject)
+        dlg.exec()
 
     def _search(self, query: str) -> None:
         self._start_search(query.strip())
@@ -785,7 +868,7 @@ class MainWindow(QMainWindow):
         self.search_pool.start(worker)
 
     def _apply_search_results(
-        self, request_id: int, query: str, rows_with_images: list[tuple[SearchResult, str]]
+        self, request_id: int, query: str, rows_with_images: list[tuple[SearchResult, str, str]]
     ) -> None:
         if self.search_dropdown is None:
             return
@@ -802,16 +885,16 @@ class MainWindow(QMainWindow):
             return
 
         self.search_dropdown.clear()
-        for row, image_b64 in rows_with_images:
+        for row, image_b64, de_desc in rows_with_images:
             chapter = row.chapter_de or "Ohne Kapitel"
             title = f"{row.de} / {row.en}"
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, row.term_id)
             self.search_dropdown.addItem(item)
             self.search_dropdown.setItemWidget(
-                item, self._build_search_result_widget(title, chapter, image_b64)
+                item, self._build_search_result_widget(title, chapter, de_desc, image_b64)
             )
-            item.setSizeHint(QSize(0, 68))
+            item.setSizeHint(QSize(0, 52))
 
         if self.search_dropdown.count() == 0:
             self.search_dropdown.hide()
@@ -822,12 +905,14 @@ class MainWindow(QMainWindow):
         self.search_dropdown.show()
         self.search_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def _build_search_result_widget(self, title: str, chapter: str, image_b64: str) -> QWidget:
+    def _build_search_result_widget(
+        self, title: str, chapter: str, de_desc: str, image_b64: str
+    ) -> QWidget:
         widget = QWidget(self.search_dropdown)
-        widget.setFixedHeight(60)
+        widget.setFixedHeight(48)
         row = QHBoxLayout(widget)
-        row.setContentsMargins(6, 4, 6, 4)
-        row.setSpacing(8)
+        row.setContentsMargins(6, 1, 6, 1)
+        row.setSpacing(6)
 
         thumb_label = QLabel(widget)
         thumb_label.setFixedSize(36, 36)
@@ -847,17 +932,29 @@ class MainWindow(QMainWindow):
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(1)
+        text_col.setSpacing(0)
+        text_col.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         title_label = QLabel(title, widget)
+        title_label.setMargin(0)
+        title_label.setStyleSheet("margin: 0px; padding: 0px;")
         chapter_label = QLabel(chapter, widget)
+        chapter_label.setMargin(0)
         ch_font = chapter_label.font()
         ch_font.setItalic(True)
         chapter_label.setFont(ch_font)
-        chapter_label.setStyleSheet("color: #9CA3AF;")
+        chapter_label.setStyleSheet("color: #9CA3AF; margin: 0px; padding: 0px;")
+        clean_desc = " ".join(de_desc.split())
+        if len(clean_desc) > 90:
+            clean_desc = clean_desc[:87] + "..."
+        desc_label = QLabel(clean_desc, widget)
+        desc_label.setMargin(0)
+        desc_label.setStyleSheet("color: #9CA3AF; margin: 0px; padding: 0px;")
+        desc_label.setWordWrap(False)
 
-        text_col.addWidget(title_label)
-        text_col.addWidget(chapter_label)
+        text_col.addWidget(title_label, 0, Qt.AlignmentFlag.AlignTop)
+        text_col.addWidget(chapter_label, 0, Qt.AlignmentFlag.AlignTop)
+        text_col.addWidget(desc_label, 0, Qt.AlignmentFlag.AlignTop)
         row.addLayout(text_col, 1)
         return widget
 
@@ -919,22 +1016,14 @@ class MainWindow(QMainWindow):
         self._load_table(
             self.syn_table,
             rows=[
-                [
-                    str(s.get("lang", "de")),
-                    str(s.get("synonym", "")),
-                    "1" if s.get("allowed", True) else "0",
-                ]
+                [str(s.get("synonym", "")), "1" if s.get("allowed", True) else "0"]
                 for s in term.get("synonyms", [])
             ],
         )
         self._load_table(
             self.ann_table,
             rows=[
-                [
-                    str(a.get("lang", "de")),
-                    str(a.get("note", "")),
-                    "1" if a.get("allowed", True) else "0",
-                ]
+                [str(a.get("note", "")), "1" if a.get("allowed", True) else "0"]
                 for a in term.get("annotations", [])
             ],
         )
@@ -955,14 +1044,36 @@ class MainWindow(QMainWindow):
     def _load_table(self, table: QTableWidget, rows: list[list[str]]) -> None:
         table.setRowCount(len(rows))
         for r_idx, row in enumerate(rows):
-            for c_idx, value in enumerate(row):
-                table.setItem(r_idx, c_idx, QTableWidgetItem(value))
+            text_value = row[0] if len(row) > 0 else ""
+            allowed_value = row[1] if len(row) > 1 else "1"
+            table.setItem(r_idx, 0, QTableWidgetItem(text_value))
+            table.setCellWidget(
+                r_idx,
+                1,
+                self._build_allowed_combo(allowed_value in {"1", "true", "True", "yes"}),
+            )
 
     def _append_table_row(self, table: QTableWidget, values: list[str]) -> None:
         row = table.rowCount()
         table.insertRow(row)
-        for col, value in enumerate(values):
-            table.setItem(row, col, QTableWidgetItem(value))
+        text_value = values[0] if len(values) > 0 else ""
+        allowed_value = values[1] if len(values) > 1 else "1"
+        table.setItem(row, 0, QTableWidgetItem(text_value))
+        table.setCellWidget(
+            row,
+            1,
+            self._build_allowed_combo(allowed_value in {"1", "true", "True", "yes"}),
+        )
+
+    def _build_allowed_combo(self, allowed: bool) -> QComboBox:
+        combo = QComboBox(self)
+        combo.addItem("✓", "1")
+        combo.addItem("✗", "0")
+        combo.setItemData(0, QColor("#16A34A"), Qt.ItemDataRole.ForegroundRole)
+        combo.setItemData(1, QColor("#DC2626"), Qt.ItemDataRole.ForegroundRole)
+        combo.setCurrentIndex(0 if allowed else 1)
+        combo.setStyleSheet("QComboBox { font-weight: 700; }")
+        return combo
 
     def _remove_selected_table_row(self, table: QTableWidget) -> None:
         row = table.currentRow()
@@ -972,20 +1083,23 @@ class MainWindow(QMainWindow):
     def _table_rows(self, table: QTableWidget, text_column_name: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for r in range(table.rowCount()):
-            lang_item = table.item(r, 0)
-            value_item = table.item(r, 1)
-            allowed_item = table.item(r, 2)
-            if lang_item is None or value_item is None:
+            value_item = table.item(r, 0)
+            allowed_combo = table.cellWidget(r, 1)
+            if value_item is None:
                 continue
             value_text = value_item.text().strip()
             if not value_text:
                 continue
+            allowed_data = "1"
+            if isinstance(allowed_combo, QComboBox):
+                selected = allowed_combo.currentData()
+                if isinstance(selected, str):
+                    allowed_data = selected
             rows.append(
                 {
-                    "lang": lang_item.text().strip() or "de",
+                    "lang": "de",
                     text_column_name: value_text,
-                    "allowed": (allowed_item.text().strip() if allowed_item else "1")
-                    in {"1", "true", "True", "yes"},
+                    "allowed": allowed_data == "1",
                 }
             )
         return rows
@@ -1030,6 +1144,38 @@ class MainWindow(QMainWindow):
         for i in range(root.childCount()):
             collect_checked(root.child(i))
 
+        synonyms_rows = self._table_rows(self.syn_table, "synonym")
+        annotations_rows = self._table_rows(self.ann_table, "note")
+        duplicate_report = self.service.detect_duplicates(
+            de,
+            en,
+            [str(row.get("synonym", "")) for row in synonyms_rows],
+            exclude_term_id=self.current_term_id,
+        )
+        exact_term_ids = duplicate_report.exact_term_ids
+        exact_syn_ids = duplicate_report.exact_synonym_term_ids
+        fuzzy_hits = duplicate_report.fuzzy_hits
+        if exact_term_ids or exact_syn_ids or fuzzy_hits:
+            hints: list[str] = []
+            if exact_term_ids:
+                hints.append(f"Exakte Begriffe: {exact_term_ids}")
+            if exact_syn_ids:
+                hints.append(f"Exakte Synonyme: {exact_syn_ids}")
+            if fuzzy_hits:
+                top = ", ".join(f"{h.value} ({h.score:.2f})" for h in fuzzy_hits[:4])
+                hints.append(f"Ähnliche Treffer: {top}")
+            proceed = QMessageBox.question(
+                self,
+                "Mögliche Duplikate gefunden",
+                "Es wurden mögliche Duplikate erkannt:\n\n"
+                + "\n".join(hints)
+                + "\n\nTrotzdem speichern?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if proceed != QMessageBox.StandardButton.Yes:
+                return
+
         term_id = self.service.save_term(
             term_id=self.current_term_id,
             de=de,
@@ -1037,8 +1183,8 @@ class MainWindow(QMainWindow):
             de_desc=self.term_de_desc.toPlainText(),
             en_desc=self.term_en_desc.toPlainText(),
             image=self.current_image_bytes,
-            synonyms=self._table_rows(self.syn_table, "synonym"),
-            annotations=self._table_rows(self.ann_table, "note"),
+            synonyms=synonyms_rows,
+            annotations=annotations_rows,
             chapter_ids=chapter_ids,
         )
 
@@ -1196,14 +1342,28 @@ class MainWindow(QMainWindow):
             chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
             if not isinstance(chapter_id, int):
                 return
-            if (
-                QMessageBox.question(
-                    selector, "Kapitel löschen", "Kapitel (inkl. Unterkapitel) wirklich löschen?"
-                )
-                != QMessageBox.StandardButton.Yes
-            ):
+            confirm = QMessageBox(selector)
+            confirm.setIcon(QMessageBox.Icon.Warning)
+            confirm.setWindowTitle("Kapitel löschen")
+            confirm.setText("Kapitel und alle Unterkapitel wirklich löschen?")
+            confirm.setInformativeText(
+                "Wie sollen die zugeordneten Begriffe behandelt werden?"
+            )
+            with_terms_btn = confirm.addButton(
+                "Mit Begriffen löschen", QMessageBox.ButtonRole.DestructiveRole
+            )
+            keep_terms_btn = confirm.addButton(
+                "Begriffe behalten (ohne Kapitel)", QMessageBox.ButtonRole.AcceptRole
+            )
+            confirm.addButton(QMessageBox.StandardButton.Cancel)
+            confirm.exec()
+            clicked = confirm.clickedButton()
+            if clicked == with_terms_btn:
+                self.service.delete_chapter(chapter_id, delete_terms=True)
+            elif clicked == keep_terms_btn:
+                self.service.delete_chapter(chapter_id, delete_terms=False)
+            else:
                 return
-            self.service.delete_chapter(chapter_id)
             nonlocal_chapters_refresh()
 
         def nonlocal_chapters_refresh(select_id: int | None = None) -> None:
@@ -1220,23 +1380,184 @@ class MainWindow(QMainWindow):
 
         selector.exec()
 
-    def _check_duplicates(self) -> None:
-        synonyms: list[str] = []
-        for r in range(self.syn_table.rowCount()):
-            item = self.syn_table.item(r, 1)
-            if item is not None:
-                synonyms.append(item.text())
-        report = self.service.detect_duplicates(self.term_de.text(), self.term_en.text(), synonyms)
+    def _open_batch_edit(self) -> None:
+        if not self.is_unlocked:
+            return
 
-        parts: list[str] = []
-        if report.exact_term_ids:
-            parts.append(f"Exakte Begriff-Duplikate: {report.exact_term_ids}")
-        if report.exact_synonym_term_ids:
-            parts.append(f"Exakte Synonym-Duplikate: {report.exact_synonym_term_ids}")
-        if report.fuzzy_hits:
-            top = ", ".join(f"{h.value} ({h.score:.2f})" for h in report.fuzzy_hits[:4])
-            parts.append(f"Ähnlichkeits-Treffer: {top}")
-        self.duplicate_output.setText(" | ".join(parts) if parts else "Keine Duplikate gefunden.")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Batch-Bearbeitung")
+        dlg.resize(920, 620)
+        layout = QHBoxLayout(dlg)
+
+        left = QWidget(dlg)
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(QLabel("Begriffe auswählen"))
+        filter_input = QLineEdit(left)
+        filter_input.setPlaceholderText("Begriffe filtern...")
+        left_layout.addWidget(filter_input)
+
+        term_list = QListWidget(left)
+        term_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        left_layout.addWidget(term_list, 1)
+        layout.addWidget(left, 1)
+
+        right = QWidget(dlg)
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(QLabel("Kapitelzuweisung (ersetzen)"))
+        chapter_tree = QTreeWidget(right)
+        chapter_tree.setColumnCount(1)
+        chapter_tree.setHeaderHidden(True)
+        chapter_tree.setRootIsDecorated(True)
+        chapter_tree.setIndentation(16)
+        right_layout.addWidget(chapter_tree, 1)
+        layout.addWidget(right, 1)
+
+        button_row = QHBoxLayout()
+        btn_assign = QPushButton("Kapitel zuweisen", dlg)
+        btn_delete = QPushButton("Begriffe löschen", dlg)
+        btn_close = QPushButton("Schließen", dlg)
+        button_row.addWidget(btn_assign)
+        button_row.addWidget(btn_delete)
+        button_row.addStretch(1)
+        button_row.addWidget(btn_close)
+        right_layout.addLayout(button_row)
+
+        all_terms = self.service.list_terms()
+
+        def refresh_term_list() -> None:
+            needle = filter_input.text().strip().casefold()
+            term_list.clear()
+            for term in sorted(all_terms, key=lambda t: str(t.get("de", "")).casefold()):
+                de = str(term.get("de", "")).strip()
+                en = str(term.get("en", "")).strip()
+                title = f"{de} | {en}".strip()
+                if needle and needle not in title.casefold():
+                    continue
+                term_id = term.get("id")
+                if not isinstance(term_id, int):
+                    continue
+                item = QListWidgetItem(title)
+                item.setData(Qt.ItemDataRole.UserRole, term_id)
+                term_list.addItem(item)
+
+        def refresh_chapter_tree() -> None:
+            chapter_tree.clear()
+            chapters = self.service.list_chapters()
+            by_parent: dict[int | None, list[Chapter]] = {}
+            for chapter in chapters:
+                by_parent.setdefault(chapter.parent_id, []).append(chapter)
+            for items in by_parent.values():
+                items.sort(key=lambda c: c.name_de.casefold())
+
+            def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+                for chapter in by_parent.get(parent_id, []):
+                    text = (
+                        f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                    )
+                    node = QTreeWidgetItem([text])
+                    node.setData(0, Qt.ItemDataRole.UserRole, chapter.id)
+                    node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    node.setCheckState(0, Qt.CheckState.Unchecked)
+                    if parent_item is None:
+                        chapter_tree.addTopLevelItem(node)
+                    else:
+                        parent_item.addChild(node)
+                    add_nodes(node, chapter.id)
+
+            add_nodes(None, None)
+            chapter_tree.expandAll()
+
+        def selected_term_ids() -> list[int]:
+            ids: list[int] = []
+            for item in term_list.selectedItems():
+                term_id = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(term_id, int):
+                    ids.append(term_id)
+            return ids
+
+        def selected_chapter_ids() -> list[int]:
+            ids: list[int] = []
+            root = chapter_tree.invisibleRootItem()
+
+            def collect(node: QTreeWidgetItem) -> None:
+                chapter_id = node.data(0, Qt.ItemDataRole.UserRole)
+                if isinstance(chapter_id, int) and node.checkState(0) == Qt.CheckState.Checked:
+                    ids.append(chapter_id)
+                for i in range(node.childCount()):
+                    collect(node.child(i))
+
+            for i in range(root.childCount()):
+                collect(root.child(i))
+            return ids
+
+        def assign_chapters() -> None:
+            ids = selected_term_ids()
+            if not ids:
+                QMessageBox.warning(dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen.")
+                return
+            chapter_ids = selected_chapter_ids()
+            for term_id in ids:
+                term = self.service.get_term(term_id)
+                if term is None:
+                    continue
+                image_bytes: bytes | None = None
+                image_b64 = term.get("image_b64")
+                if isinstance(image_b64, str) and image_b64:
+                    image_bytes = base64.b64decode(image_b64)
+                synonyms = term.get("synonyms", [])
+                annotations = term.get("annotations", [])
+                self.service.save_term(
+                    term_id=term_id,
+                    de=str(term.get("de", "")),
+                    en=str(term.get("en", "")),
+                    de_desc=str(term.get("de_desc", "")),
+                    en_desc=str(term.get("en_desc", "")),
+                    image=image_bytes,
+                    synonyms=synonyms if isinstance(synonyms, list) else [],
+                    annotations=annotations if isinstance(annotations, list) else [],
+                    chapter_ids=chapter_ids,
+                )
+            self._load_chapters()
+            self._refresh_term_sidebar()
+            self._search(self.search_input.text())
+            if self.current_term_id in ids:
+                self._load_term(self.current_term_id)
+            self.statusBar().showMessage(f"{len(ids)} Begriffe aktualisiert", 3000)
+
+        def delete_terms() -> None:
+            ids = selected_term_ids()
+            if not ids:
+                QMessageBox.warning(dlg, "Keine Auswahl", "Bitte mindestens einen Begriff auswählen.")
+                return
+            if (
+                QMessageBox.question(
+                    dlg,
+                    "Begriffe löschen",
+                    f"Wirklich {len(ids)} Begriffe löschen?",
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+            for term_id in ids:
+                self.service.delete_term(term_id)
+            if self.current_term_id in ids:
+                self._new_term()
+            nonlocal all_terms
+            all_terms = self.service.list_terms()
+            refresh_term_list()
+            self._load_chapters()
+            self._refresh_term_sidebar()
+            self._search(self.search_input.text())
+            self.statusBar().showMessage(f"{len(ids)} Begriffe gelöscht", 3000)
+
+        filter_input.textChanged.connect(refresh_term_list)
+        btn_assign.clicked.connect(assign_chapters)
+        btn_delete.clicked.connect(delete_terms)
+        btn_close.clicked.connect(dlg.accept)
+
+        refresh_term_list()
+        refresh_chapter_tree()
+        dlg.exec()
 
     def _show_history(self) -> None:
         if self.current_term_id is None:
@@ -1448,31 +1769,3 @@ class MainWindow(QMainWindow):
             f"<tr><td>{img_html(before_b64)}</td><td>{img_html(after_b64)}</td></tr>"
             "</table>"
         )
-
-    def _import_file(self) -> None:
-        if not self.is_unlocked:
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Importieren",
-            "",
-            "Unterstützt (*.json *.csv *.xlsx *.xls)",
-        )
-        if not path:
-            return
-        count = self.service.import_file(Path(path))
-        self.statusBar().showMessage(f"{count} Begriffe importiert", 5000)
-        self._refresh_term_sidebar()
-        self._search(self.search_input.text())
-
-    def _export_file(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Exportieren",
-            "terms.json",
-            "JSON (*.json);;CSV (*.csv);;Excel (*.xlsx)",
-        )
-        if not path:
-            return
-        self.service.export_all(Path(path))
-        self.statusBar().showMessage("Export abgeschlossen", 3000)

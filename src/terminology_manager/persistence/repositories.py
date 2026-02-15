@@ -121,6 +121,22 @@ class ChapterRepository:
         if chapter is not None:
             self.session.delete(chapter)
 
+    def descendant_ids(self, chapter_id: int) -> list[int]:
+        chapters = self.list_all()
+        by_parent: dict[int | None, list[Chapter]] = {}
+        for chapter in chapters:
+            by_parent.setdefault(chapter.parent_id, []).append(chapter)
+
+        out: list[int] = []
+
+        def walk(parent_id: int) -> None:
+            for child in by_parent.get(parent_id, []):
+                out.append(child.id)
+                walk(child.id)
+
+        walk(chapter_id)
+        return out
+
 
 class TermRepository:
     def __init__(self, session: Session):
@@ -175,6 +191,21 @@ class TermRepository:
         if term is not None:
             self.session.delete(term)
 
+    def delete_many(self, term_ids: list[int]) -> None:
+        for term_id in sorted(set(term_ids)):
+            term = self.session.get(Term, term_id)
+            if term is not None:
+                self.session.delete(term)
+        self.session.flush()
+
+    def term_ids_for_chapters(self, chapter_ids: list[int]) -> list[int]:
+        if not chapter_ids:
+            return []
+        rows = self.session.execute(
+            select(TermChapter.term_id).where(TermChapter.chapter_id.in_(chapter_ids))
+        ).all()
+        return sorted({int(term_id) for (term_id,) in rows})
+
     def replace_synonyms(self, term_id: int, rows: list[dict[str, Any]]) -> None:
         self.session.query(Synonym).where(Synonym.term_id == term_id).delete(
             synchronize_session=False
@@ -211,18 +242,36 @@ class TermRepository:
             self.session.add(TermChapter(term_id=term_id, chapter_id=chapter_id))
         self.session.flush()
 
-    def set_logo(self, logo_bytes: bytes | None) -> None:
-        setting = self.session.get(Setting, "logo")
+    def _set_setting_bytes(self, key: str, value: bytes | None) -> None:
+        setting = self.session.get(Setting, key)
         if setting is None:
-            setting = Setting(key="logo", value=logo_bytes)
+            setting = Setting(key=key, value=value)
             self.session.add(setting)
         else:
-            setting.value = logo_bytes
+            setting.value = value
         self.session.flush()
 
-    def get_logo(self) -> bytes | None:
-        setting = self.session.get(Setting, "logo")
+    def _get_setting_bytes(self, key: str) -> bytes | None:
+        setting = self.session.get(Setting, key)
         return None if setting is None else setting.value
+
+    def set_logo(self, logo_bytes: bytes | None) -> None:
+        self._set_setting_bytes("logo", logo_bytes)
+
+    def get_logo(self) -> bytes | None:
+        return self._get_setting_bytes("logo")
+
+    def set_edit_pin(self, pin: str) -> None:
+        self._set_setting_bytes("edit_pin", pin.encode("utf-8"))
+
+    def get_edit_pin(self) -> str | None:
+        raw = self._get_setting_bytes("edit_pin")
+        if raw is None:
+            return None
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
     def _build_fts_query(self, query: str) -> str:
         tokens = re.findall(r"[0-9A-Za-zÀ-ÿ]+", query.strip())

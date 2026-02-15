@@ -38,12 +38,16 @@ packages = ["src/terminology_manager"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/terminology_manager/assets/k&z_logo.svg" = "terminology_manager/assets/k&z_logo.svg"
+"src/terminology_manager/assets/app_logo.png" = "terminology_manager/assets/app_logo.png"
+"src/terminology_manager/assets/app_icon.png" = "terminology_manager/assets/app_icon.png"
 "src/terminology_manager/assets/lock-open.svg" = "terminology_manager/assets/lock-open.svg"
 "src/terminology_manager/assets/lock-closed.svg" = "terminology_manager/assets/lock-closed.svg"
 
 [tool.hatch.build.targets.sdist]
 include = [
   "src/terminology_manager/assets/k&z_logo.svg",
+  "src/terminology_manager/assets/app_logo.png",
+  "src/terminology_manager/assets/app_icon.png",
   "src/terminology_manager/assets/lock-open.svg",
   "src/terminology_manager/assets/lock-closed.svg",
 ]

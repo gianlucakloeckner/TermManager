@@ -167,28 +167,59 @@ class TerminologyService:
             )
             return chapter.id
 
-    def delete_chapter(self, chapter_id: int) -> None:
+    def delete_chapter(self, chapter_id: int, delete_terms: bool = False) -> None:
         with session_scope(self.session_factory) as session:
             chapter_repo = ChapterRepository(session)
+            term_repo = TermRepository(session)
             version_repo = VersionRepository(session)
-            chapter = chapter_repo.get(chapter_id)
-            if chapter is None:
+            root = chapter_repo.get(chapter_id)
+            if root is None:
                 return
-            before = {
-                "id": chapter.id,
-                "name_de": chapter.name_de,
-                "name_en": chapter.name_en,
-                "visible": chapter.visible,
-                "parent_id": chapter.parent_id,
-            }
-            chapter_repo.delete(chapter_id)
-            version_repo.record(
-                entity_type="chapter",
-                entity_id=chapter_id,
-                action="delete",
-                before=before,
-                after=None,
-            )
+
+            delete_ids = [chapter_id, *chapter_repo.descendant_ids(chapter_id)]
+            before_map: dict[int, dict[str, Any]] = {}
+            for cid in delete_ids:
+                chapter = chapter_repo.get(cid)
+                if chapter is None:
+                    continue
+                before_map[cid] = {
+                    "id": chapter.id,
+                    "name_de": chapter.name_de,
+                    "name_en": chapter.name_en,
+                    "visible": chapter.visible,
+                    "parent_id": chapter.parent_id,
+                }
+
+            if delete_terms:
+                term_ids = term_repo.term_ids_for_chapters(delete_ids)
+                for term_id in term_ids:
+                    term = term_repo.get(term_id)
+                    if term is None:
+                        continue
+                    before_payload = serialize_term(term)
+                    term_repo.delete(term_id)
+                    version_repo.record(
+                        entity_type="term",
+                        entity_id=term_id,
+                        action="delete",
+                        before=before_payload,
+                        after=None,
+                    )
+
+            for cid in sorted(delete_ids, reverse=True):
+                chapter_repo.delete(cid)
+
+            for cid in delete_ids:
+                before = before_map.get(cid)
+                if before is None:
+                    continue
+                version_repo.record(
+                    entity_type="chapter",
+                    entity_id=cid,
+                    action="delete",
+                    before=before,
+                    after=None,
+                )
 
     def set_logo(self, logo_bytes: bytes | None) -> None:
         with session_scope(self.session_factory) as session:
@@ -198,9 +229,21 @@ class TerminologyService:
         with session_scope(self.session_factory) as session:
             return TermRepository(session).get_logo()
 
-    def detect_duplicates(self, de: str, en: str, synonyms: list[str]) -> DuplicateReport:
+    def get_edit_pin(self) -> str | None:
+        with session_scope(self.session_factory) as session:
+            return TermRepository(session).get_edit_pin()
+
+    def set_edit_pin(self, pin: str) -> None:
+        with session_scope(self.session_factory) as session:
+            TermRepository(session).set_edit_pin(pin)
+
+    def detect_duplicates(
+        self, de: str, en: str, synonyms: list[str], exclude_term_id: int | None = None
+    ) -> DuplicateReport:
         with session_scope(self.session_factory) as session:
             candidates = TermRepository(session).duplicate_candidates(de, en, synonyms)
+        if isinstance(exclude_term_id, int):
+            candidates = [candidate for candidate in candidates if candidate.id != exclude_term_id]
 
         exact_term_ids: list[int] = []
         exact_syn_term_ids: list[int] = []
