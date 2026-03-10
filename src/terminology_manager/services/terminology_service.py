@@ -49,20 +49,26 @@ class TerminologyService:
         en: str,
         de_desc: str,
         en_desc: str,
+        annotations: str,
         image: bytes | None,
         synonyms: list[dict[str, Any]],
-        annotations: list[dict[str, Any]],
         chapter_ids: list[int],
     ) -> int:
         with session_scope(self.session_factory) as session:
             term_repo = TermRepository(session)
             version_repo = VersionRepository(session)
-            payload = TermUpsert(de=de, en=en, de_desc=de_desc, en_desc=en_desc, image=image)
+            payload = TermUpsert(
+                de=de,
+                en=en,
+                de_desc=de_desc,
+                en_desc=en_desc,
+                annotations=annotations,
+                image=image,
+            )
 
             if term_id is None:
                 term = term_repo.create(payload)
                 term_repo.replace_synonyms(term.id, synonyms)
-                term_repo.replace_annotations(term.id, annotations)
                 term_repo.assign_chapters(term.id, chapter_ids)
                 term_after = term_repo.get(term.id)
                 if term_after is not None:
@@ -82,7 +88,6 @@ class TerminologyService:
 
             term_repo.update(term_id, payload)
             term_repo.replace_synonyms(term_id, synonyms)
-            term_repo.replace_annotations(term_id, annotations)
             term_repo.assign_chapters(term_id, chapter_ids)
 
             after_term = term_repo.get(term_id)
@@ -279,9 +284,9 @@ class TerminologyService:
                 en=row["en"],
                 de_desc=row.get("de_desc", ""),
                 en_desc=row.get("en_desc", ""),
+                annotations=str(row.get("annotations", "")),
                 image=None,
                 synonyms=row.get("synonyms", []),
-                annotations=row.get("annotations", []),
                 chapter_ids=row.get("chapter_ids", []),
             )
             imported += 1
