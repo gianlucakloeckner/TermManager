@@ -145,9 +145,7 @@ class TermRepository:
     def list_all(self) -> list[Term]:
         stmt: Select[tuple[Term]] = (
             select(Term)
-            .options(
-                joinedload(Term.synonyms), joinedload(Term.chapters)
-            )
+            .options(joinedload(Term.synonyms), joinedload(Term.chapters))
             .order_by(Term.de.asc())
         )
         return list(self.session.scalars(stmt).unique().all())
