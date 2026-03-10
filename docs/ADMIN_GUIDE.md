@@ -5,7 +5,7 @@ There is no role-based login. Editing is controlled by the lock in the top bar.
 ## Edit Workflow
 1. Click **Unlock Editing**.
 2. Create or select a term.
-3. Edit fields, synonyms, annotations, chapters, and image.
+3. Edit fields, synonyms, annotation text, chapters, and image.
 4. Click **Save**.
 5. Review changes in **History**.
 

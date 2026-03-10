@@ -13,9 +13,9 @@ EXPORT_COLUMNS = [
     "en",
     "de_desc",
     "en_desc",
+    "annotations",
     "chapter_ids",
     "synonyms_json",
-    "annotations_json",
 ]
 
 
@@ -28,9 +28,9 @@ def export_terms(rows: list[dict[str, Any]], target: Path) -> None:
             "en": row.get("en", ""),
             "de_desc": row.get("de_desc", ""),
             "en_desc": row.get("en_desc", ""),
+            "annotations": row.get("annotations", ""),
             "chapter_ids": json.dumps(row.get("chapter_ids", []), ensure_ascii=False),
             "synonyms_json": json.dumps(row.get("synonyms", []), ensure_ascii=False),
-            "annotations_json": json.dumps(row.get("annotations", []), ensure_ascii=False),
         }
         for row in rows
     ]
@@ -69,20 +69,31 @@ def import_terms(source: Path) -> list[dict[str, Any]]:
     for row in rows:
         chapter_ids = row.get("chapter_ids", "[]")
         synonyms = row.get("synonyms_json", "[]")
-        annotations = row.get("annotations_json", "[]")
+        annotations_raw = row.get("annotations", "")
+        if not annotations_raw and "annotations_json" in row:
+            legacy_annotations = row.get("annotations_json", "[]")
+            legacy_rows = (
+                json.loads(legacy_annotations)
+                if isinstance(legacy_annotations, str)
+                else (legacy_annotations or [])
+            )
+            if isinstance(legacy_rows, list):
+                annotations_raw = "\n".join(
+                    str(item.get("note", "")).strip()
+                    for item in legacy_rows
+                    if isinstance(item, dict) and str(item.get("note", "")).strip()
+                )
         output.append(
             {
                 "de": str(row.get("de", "")).strip(),
                 "en": str(row.get("en", "")).strip(),
                 "de_desc": str(row.get("de_desc", "")).strip(),
                 "en_desc": str(row.get("en_desc", "")).strip(),
+                "annotations": str(annotations_raw).strip(),
                 "chapter_ids": (
                     json.loads(chapter_ids) if isinstance(chapter_ids, str) else chapter_ids
                 ),
                 "synonyms": json.loads(synonyms) if isinstance(synonyms, str) else (synonyms or []),
-                "annotations": (
-                    json.loads(annotations) if isinstance(annotations, str) else (annotations or [])
-                ),
             }
         )
     return output

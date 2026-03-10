@@ -5,7 +5,6 @@ SQLite + SQLAlchemy.
 Core tables:
 - `terms`
 - `synonyms`
-- `annotations`
 - `chapters`
 - `term_chapters`
 - `settings`

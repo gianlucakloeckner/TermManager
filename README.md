@@ -28,7 +28,7 @@ uv run pytest
 
 ## Build
 ```bash
-uv run pyinstaller --name TerminologyManager --windowed --onefile src/terminology_manager/main.py
+uv run pyinstaller TerminologyManager.spec --noconfirm
 ```
 
 See `docs/` for architecture, database, testing, and release flow.

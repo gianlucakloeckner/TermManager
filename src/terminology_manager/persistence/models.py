@@ -28,6 +28,7 @@ class Term(Base):
     en: Mapped[str] = mapped_column(String(255), nullable=False)
     de_desc: Mapped[str] = mapped_column(Text, default="", nullable=False)
     en_desc: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    annotations: Mapped[str] = mapped_column(Text, default="", nullable=False)
     image: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
@@ -35,9 +36,6 @@ class Term(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
 
     synonyms: Mapped[list[Synonym]] = relationship(
-        back_populates="term", cascade="all, delete-orphan"
-    )
-    annotations: Mapped[list[Annotation]] = relationship(
         back_populates="term", cascade="all, delete-orphan"
     )
     chapters: Mapped[list[TermChapter]] = relationship(
@@ -56,18 +54,6 @@ class Synonym(Base):
     allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     term: Mapped[Term] = relationship(back_populates="synonyms")
-
-
-class Annotation(Base):
-    __tablename__ = "annotations"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    term_id: Mapped[int] = mapped_column(ForeignKey("terms.id", ondelete="CASCADE"), nullable=False)
-    lang: Mapped[str] = mapped_column(String(2), nullable=False)
-    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-    term: Mapped[Term] = relationship(back_populates="annotations")
 
 
 class Chapter(Base):

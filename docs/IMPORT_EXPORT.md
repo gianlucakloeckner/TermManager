@@ -9,7 +9,7 @@ Data includes:
 - term fields
 - chapter IDs
 - synonyms JSON payload
-- annotations JSON payload
+- annotations plain-text field
 
 Use top bar buttons:
 - `Import` to load a file

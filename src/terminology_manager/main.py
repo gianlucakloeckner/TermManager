@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -24,9 +25,16 @@ def main() -> int:
     initialize_database(engine)
     session_factory = make_session_factory(engine)
 
+    if sys.platform == "win32":
+        app_id = "KZ.TerminologyManager"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+
     app = QApplication(sys.argv)
     app.setApplicationName(config.app_name)
-    icon_path = Path(__file__).resolve().parent / "assets" / "app_icon.png"
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    icon_path = assets_dir / "app_icon.ico"
+    if not icon_path.exists():
+        icon_path = assets_dir / "app_icon.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     app.setStyleSheet("""
@@ -34,6 +42,15 @@ def main() -> int:
         QMainWindow { background: #15171A; }
         QLineEdit, QTextEdit, QTreeWidget, QTableWidget, QListWidget, QTextBrowser {
             background: #1F242B; color: #E6EAF0; border: 1px solid #2C3440; border-radius: 6px;
+            selection-background-color: #2563EB; selection-color: #FFFFFF;
+            alternate-background-color: #262C35;
+        }
+        QTreeWidget::item, QListWidget::item, QTableWidget::item { color: #E6EAF0; }
+        QTreeWidget::item:selected, QListWidget::item:selected, QTableWidget::item:selected {
+            background: #2563EB; color: #FFFFFF;
+        }
+        QTreeWidget::item:alternate, QListWidget::item:alternate, QTableWidget::item:alternate {
+            background: #262C35; color: #E6EAF0;
         }
         QPushButton { background: #2563EB; color: #FFFFFF; border-radius: 6px; padding: 6px 10px; }
         QPushButton:hover { background: #1D4ED8; }
@@ -42,7 +59,16 @@ def main() -> int:
             color: #A3AAB4;
             border: 1px solid #374151;
         }
-        QToolBar { background: #111827; color: #E6EAF0; spacing: 6px; }
+        QToolBar { background: #111827; color: #E6EAF0; spacing: 6px; padding: 4px 6px; }
+        QToolBar QToolButton {
+            background: transparent;
+            color: #E6EAF0;
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+        QToolBar QToolButton:hover { background: #1F2937; color: #FFFFFF; }
+        QToolBar QToolButton:checked { background: #2563EB; color: #FFFFFF; }
+        QToolBar QToolButton:disabled { color: #7C8797; }
         QLabel { color: #D1D5DB; }
         QHeaderView::section { background: #111827; color: #E5E7EB; padding: 4px; }
         """)

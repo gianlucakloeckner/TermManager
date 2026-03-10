@@ -10,7 +10,7 @@
 
 ## Edit Terms
 - Unlock editing.
-- Use `New Term`, fill fields, add rows for synonyms/annotations, assign chapters, then `Save`.
+- Use `New Term`, fill fields, maintain synonyms, edit the annotation text, assign chapters, then `Save`.
 - Use `Delete` to remove current term.
 
 ## Power-User Mode

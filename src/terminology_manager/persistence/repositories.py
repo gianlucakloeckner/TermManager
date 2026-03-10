@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session, joinedload
 
 from terminology_manager.domain.entities import SearchResult, VersionRecord
 from terminology_manager.persistence.models import (
-    Annotation,
     Chapter,
     Setting,
     Synonym,
@@ -28,6 +27,7 @@ class TermUpsert:
     en: str
     de_desc: str
     en_desc: str
+    annotations: str
     image: bytes | None
 
 
@@ -145,9 +145,7 @@ class TermRepository:
     def list_all(self) -> list[Term]:
         stmt: Select[tuple[Term]] = (
             select(Term)
-            .options(
-                joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters)
-            )
+            .options(joinedload(Term.synonyms), joinedload(Term.chapters))
             .order_by(Term.de.asc())
         )
         return list(self.session.scalars(stmt).unique().all())
@@ -156,9 +154,7 @@ class TermRepository:
         stmt: Select[tuple[Term]] = (
             select(Term)
             .where(Term.id == term_id)
-            .options(
-                joinedload(Term.synonyms), joinedload(Term.annotations), joinedload(Term.chapters)
-            )
+            .options(joinedload(Term.synonyms), joinedload(Term.chapters))
         )
         return self.session.scalars(stmt).unique().one_or_none()
 
@@ -168,6 +164,7 @@ class TermRepository:
             en=payload.en.strip(),
             de_desc=payload.de_desc.strip(),
             en_desc=payload.en_desc.strip(),
+            annotations=payload.annotations.strip(),
             image=payload.image,
         )
         self.session.add(term)
@@ -182,6 +179,7 @@ class TermRepository:
         term.en = payload.en.strip()
         term.de_desc = payload.de_desc.strip()
         term.en_desc = payload.en_desc.strip()
+        term.annotations = payload.annotations.strip()
         term.image = payload.image
         self.session.flush()
         return term
@@ -218,20 +216,6 @@ class TermRepository:
                 allowed=bool(row.get("allowed", True)),
             )
             self.session.add(synonym)
-        self.session.flush()
-
-    def replace_annotations(self, term_id: int, rows: list[dict[str, Any]]) -> None:
-        self.session.query(Annotation).where(Annotation.term_id == term_id).delete(
-            synchronize_session=False
-        )
-        for row in rows:
-            note = Annotation(
-                term_id=term_id,
-                lang=str(row["lang"]).strip(),
-                note=str(row["note"]).strip(),
-                allowed=bool(row.get("allowed", True)),
-            )
-            self.session.add(note)
         self.session.flush()
 
     def assign_chapters(self, term_id: int, chapter_ids: list[int]) -> None:
@@ -365,6 +349,7 @@ def serialize_term(term: Term) -> dict[str, Any]:
         "en": term.en,
         "de_desc": term.de_desc,
         "en_desc": term.en_desc,
+        "annotations": term.annotations,
         "image": bool(term.image),
         "image_b64": base64.b64encode(term.image).decode("ascii") if term.image else "",
         "updated_at": (
@@ -373,10 +358,6 @@ def serialize_term(term: Term) -> dict[str, Any]:
         "synonyms": [
             {"id": s.id, "lang": s.lang, "synonym": s.synonym, "allowed": s.allowed}
             for s in term.synonyms
-        ],
-        "annotations": [
-            {"id": a.id, "lang": a.lang, "note": a.note, "allowed": a.allowed}
-            for a in term.annotations
         ],
         "chapter_ids": [tc.chapter_id for tc in term.chapters],
     }

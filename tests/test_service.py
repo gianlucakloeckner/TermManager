@@ -24,9 +24,9 @@ def test_history_and_search(tmp_path: Path) -> None:
         en="Generator",
         de_desc="Strom erzeuger",
         en_desc="Creates power",
+        annotations="",
         image=None,
         synonyms=[{"lang": "de", "synonym": "Dynamo", "allowed": True}],
-        annotations=[],
         chapter_ids=[chapter_id],
     )
 
@@ -39,9 +39,9 @@ def test_history_and_search(tmp_path: Path) -> None:
         en="Generator",
         de_desc="Stromerzeuger",
         en_desc="Creates electric power",
+        annotations="Neu",
         image=None,
         synonyms=[{"lang": "de", "synonym": "Dynamo", "allowed": True}],
-        annotations=[{"lang": "de", "note": "Neu", "allowed": True}],
         chapter_ids=[chapter_id],
     )
 
@@ -57,9 +57,9 @@ def test_prefix_search(tmp_path: Path) -> None:
         en="Conveyor Belt",
         de_desc="",
         en_desc="",
+        annotations="",
         image=None,
         synonyms=[],
-        annotations=[],
         chapter_ids=[],
     )
     results = service.search("con")
@@ -74,9 +74,9 @@ def test_duplicate_detection(tmp_path: Path) -> None:
         en="Cable",
         de_desc="",
         en_desc="",
+        annotations="",
         image=None,
         synonyms=[{"lang": "de", "synonym": "Kabel", "allowed": True}],
-        annotations=[],
         chapter_ids=[],
     )
     report = service.detect_duplicates("Leitung", "Wire", ["Kabel"])
