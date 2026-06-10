@@ -50,7 +50,9 @@ class GitHubUpdateService:
         release_url = str(payload.get("html_url", "")).strip()
         notes = str(payload.get("body", "") or "")
         download_url = self._select_asset_url(payload.get("assets", []), release_url)
-        update_available = self._version_tuple(latest_version) > self._version_tuple(current_version)
+        update_available = self._version_tuple(latest_version) > self._version_tuple(
+            current_version
+        )
         return UpdateCheckResult(
             update_available=update_available,
             current_version=current_version,

@@ -109,7 +109,7 @@ class UpdateCheckWorkerSignals(QObject):
 
 
 class UpdateCheckWorker(QRunnable):
-    def __init__(self, service: "GitHubUpdateService", current_version: str) -> None:
+    def __init__(self, service: GitHubUpdateService, current_version: str) -> None:
         super().__init__()
         self.service = service
         self.current_version = current_version
@@ -133,7 +133,7 @@ class DownloadWorkerSignals(QObject):
 class DownloadWorker(QRunnable):
     def __init__(
         self,
-        service: "GitHubUpdateService",
+        service: GitHubUpdateService,
         url: str,
         target_dir: Path,
         cancel_event: threading.Event,
@@ -1135,7 +1135,9 @@ class MainWindow(QMainWindow):
             [str(updater_sh), str(os.getpid()), str(current_bundle), str(new_bundle)],
             start_new_session=True,
         )
-        QMessageBox.information(self, "Update", "Update wird installiert. Die App wird neu gestartet.")
+        QMessageBox.information(
+            self, "Update", "Update wird installiert. Die App wird neu gestartet."
+        )
         self.close()
 
     def _apply_downloaded_update_windows(self, file_path: Path) -> None:
@@ -1180,13 +1182,13 @@ class MainWindow(QMainWindow):
             f"set SOURCE={new_exe}\n"
             f"set PID={os.getpid()}\n"
             ":waitloop\n"
-            "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\n"
+            'tasklist /FI "PID eq %PID%" | find "%PID%" >nul\n'
             "if not errorlevel 1 (\n"
             "  timeout /t 1 /nobreak >nul\n"
             "  goto waitloop\n"
             ")\n"
-            "copy /Y \"%SOURCE%\" \"%TARGET%\" >nul\n"
-            "start \"\" \"%TARGET%\"\n"
+            'copy /Y "%SOURCE%" "%TARGET%" >nul\n'
+            'start "" "%TARGET%"\n'
             "exit /b 0\n"
         )
         updater_bat.write_text(bat_content, encoding="utf-8")
@@ -1194,7 +1196,9 @@ class MainWindow(QMainWindow):
             getattr(subprocess, "DETACHED_PROCESS", 0)
         )
         subprocess.Popen(["cmd", "/c", str(updater_bat)], creationflags=creationflags)
-        QMessageBox.information(self, "Update", "Update wird installiert. Die App wird neu gestartet.")
+        QMessageBox.information(
+            self, "Update", "Update wird installiert. Die App wird neu gestartet."
+        )
         self.close()
 
     def _search(self, query: str) -> None:
