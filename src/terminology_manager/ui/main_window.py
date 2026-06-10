@@ -3,6 +3,12 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +49,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -62,6 +69,7 @@ from terminology_manager.config import AppConfig
 from terminology_manager.domain.entities import SearchResult
 from terminology_manager.persistence.models import Chapter
 from terminology_manager.services.terminology_service import TerminologyService
+from terminology_manager.services.update_service import GitHubUpdateService, UpdateCheckResult
 from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
 PIN_LENGTH = 4
@@ -94,6 +102,60 @@ class SearchWorker(QRunnable):
             if len(payload) >= 25:
                 break
         self.signals.finished.emit(self.request_id, self.query, payload)
+
+
+class UpdateCheckWorkerSignals(QObject):
+    finished = Signal(object)  # UpdateCheckResult | Exception
+
+
+class UpdateCheckWorker(QRunnable):
+    def __init__(self, service: GitHubUpdateService, current_version: str) -> None:
+        super().__init__()
+        self.service = service
+        self.current_version = current_version
+        self.signals = UpdateCheckWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.service.check_for_update(self.current_version)
+            self.signals.finished.emit(result)
+        except Exception as exc:
+            self.signals.finished.emit(exc)
+
+
+class DownloadWorkerSignals(QObject):
+    progress = Signal(int, int)
+    finished = Signal(object)  # Path
+    error = Signal(str)
+    cancelled = Signal()
+
+
+class DownloadWorker(QRunnable):
+    def __init__(
+        self,
+        service: GitHubUpdateService,
+        url: str,
+        target_dir: Path,
+        cancel_event: threading.Event,
+    ) -> None:
+        super().__init__()
+        self.service = service
+        self.url = url
+        self.target_dir = target_dir
+        self.cancel_event = cancel_event
+        self.signals = DownloadWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.service.download_asset(
+                self.url, self.target_dir, self.signals.progress.emit, self.cancel_event
+            )
+            self.signals.finished.emit(result)
+        except Exception as exc:
+            if self.cancel_event.is_set():
+                self.signals.cancelled.emit()
+            else:
+                self.signals.error.emit(str(exc))
 
 
 class ChapterDialog(QDialog):
@@ -157,6 +219,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.service = service
         self.config = config
+        self.update_service = GitHubUpdateService(
+            owner=self.config.update_repo_owner,
+            repo=self.config.update_repo_name,
+        )
         self.setWindowTitle("Terminologie-Manager")
         self.resize(1380, 860)
 
@@ -172,11 +238,14 @@ class MainWindow(QMainWindow):
         self.search_debounce.timeout.connect(self._run_search_from_input)
         self.search_pool = QThreadPool.globalInstance()
         self.search_request_id = 0
+        self._update_progress: QProgressDialog | None = None
 
         self._build_ui()
         self._refresh_all()
         self._set_lock_state(False)
         self._ensure_edit_pin_in_db()
+        if self.config.auto_update_check:
+            QTimer.singleShot(1200, self._check_for_updates_silent)
 
     def _build_ui(self) -> None:
         top = QToolBar("Menü")
@@ -764,7 +833,7 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Einstellungen")
-        dlg.resize(620, 260)
+        dlg.resize(680, 340)
         layout = QVBoxLayout(dlg)
 
         form = QFormLayout()
@@ -787,14 +856,20 @@ class MainWindow(QMainWindow):
         form.addRow("Neue PIN", new_pin_input)
         form.addRow("PIN bestätigen", confirm_pin_input)
 
+        auto_update_check = QCheckBox("Beim Start automatisch nach Updates suchen", dlg)
+        auto_update_check.setChecked(self.config.auto_update_check)
+        form.addRow("", auto_update_check)
+
         hint = QLabel("PIN muss genau 4 Zeichen haben.", dlg)
         hint.setStyleSheet("color: #9CA3AF;")
         form.addRow("", hint)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
+        btn_check_updates = QPushButton("Jetzt nach Updates suchen", dlg)
         btn_save = QPushButton("Speichern", dlg)
         btn_cancel = QPushButton("Abbrechen", dlg)
+        buttons.addWidget(btn_check_updates)
         buttons.addStretch(1)
         buttons.addWidget(btn_save)
         buttons.addWidget(btn_cancel)
@@ -843,13 +918,16 @@ class MainWindow(QMainWindow):
 
             db_changed = new_db_path != self.config.database_path
             pin_changed = wants_pin_change and new_pin != db_pin
+            auto_changed = auto_update_check.isChecked() != self.config.auto_update_check
             if not db_changed and not pin_changed:
-                dlg.accept()
-                return
+                if not auto_changed:
+                    dlg.accept()
+                    return
 
             self.config.database_path = new_db_path
             if pin_changed:
                 self.service.set_edit_pin(new_pin)
+            self.config.auto_update_check = auto_update_check.isChecked()
 
             try:
                 self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -865,13 +943,263 @@ class MainWindow(QMainWindow):
                 messages.append("PIN wurde aktualisiert.")
             if db_changed:
                 messages.append("Datenbankpfad wurde aktualisiert. Neustart erforderlich.")
+            if auto_changed:
+                messages.append("Update-Einstellungen wurden aktualisiert.")
             QMessageBox.information(dlg, "Einstellungen gespeichert", "\n".join(messages))
             dlg.accept()
 
         db_browse_btn.clicked.connect(browse_db_path)
+        btn_check_updates.clicked.connect(lambda: self._check_for_updates_manual())
         btn_save.clicked.connect(save_settings)
         btn_cancel.clicked.connect(dlg.reject)
         dlg.exec()
+
+    def _check_for_updates_silent(self) -> None:
+        self._check_for_updates(show_no_update=False, show_errors=False)
+
+    def _check_for_updates_manual(self) -> None:
+        self._check_for_updates(show_no_update=True, show_errors=True)
+
+    def _check_for_updates(self, show_no_update: bool, show_errors: bool) -> None:
+        worker = UpdateCheckWorker(self.update_service, self.config.app_version)
+        worker.signals.finished.connect(
+            lambda result: self._on_update_check_finished(result, show_no_update, show_errors)
+        )
+        self.search_pool.start(worker)
+
+    def _on_update_check_finished(
+        self, result: object, show_no_update: bool, show_errors: bool
+    ) -> None:
+        if isinstance(result, BaseException):
+            if show_errors:
+                QMessageBox.warning(self, "Update-Prüfung fehlgeschlagen", str(result))
+            return
+        if not isinstance(result, UpdateCheckResult):
+            return
+        if not result.update_available:
+            if show_no_update:
+                QMessageBox.information(
+                    self,
+                    "Kein Update verfügbar",
+                    f"Aktuelle Version {result.current_version} ist auf dem neuesten Stand.",
+                )
+            return
+        self._prompt_update(result)
+
+    def _prompt_update(self, result: UpdateCheckResult) -> None:
+        notes = (result.release_notes or "").strip()
+        if len(notes) > 700:
+            notes = notes[:700] + "\n..."
+        message = (
+            f"Neue Version verfügbar: {result.latest_version}\n"
+            f"Aktuell installiert: {result.current_version}\n\n"
+            "Update jetzt herunterladen?"
+        )
+        if notes:
+            message += f"\n\nRelease Notes:\n{notes}"
+        choice = QMessageBox.question(
+            self,
+            "Update verfügbar",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        target = result.download_url or result.release_url
+        if not target:
+            QMessageBox.warning(self, "Update", "Kein Download-Link verfügbar.")
+            return
+        self._download_and_apply_update(target, result.latest_version)
+
+    def _download_and_apply_update(self, url: str, latest_version: str) -> None:
+        cancel_event = threading.Event()
+
+        progress = QProgressDialog("Update wird heruntergeladen...", "Abbrechen", 0, 100, self)
+        progress.setWindowTitle("Update")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.canceled.connect(cancel_event.set)
+        self._update_progress = progress
+        progress.show()
+
+        target_dir = Path(tempfile.gettempdir()) / "terminology_manager_updates" / latest_version
+        worker = DownloadWorker(self.update_service, url, target_dir, cancel_event)
+
+        def on_progress(read_bytes: int, total_bytes: int) -> None:
+            if self._update_progress is None:
+                return
+            if total_bytes > 0:
+                self._update_progress.setValue(min(100, int(read_bytes * 100 / total_bytes)))
+            else:
+                self._update_progress.setValue(0)
+
+        def on_finished(file_path: object) -> None:
+            if self._update_progress is not None:
+                self._update_progress.setValue(100)
+                self._update_progress.close()
+                self._update_progress = None
+            if isinstance(file_path, Path):
+                self._apply_downloaded_update(file_path)
+
+        def on_error(message: str) -> None:
+            if self._update_progress is not None:
+                self._update_progress.close()
+                self._update_progress = None
+            QMessageBox.warning(self, "Update-Download fehlgeschlagen", message)
+
+        def on_cancelled() -> None:
+            if self._update_progress is not None:
+                self._update_progress.close()
+                self._update_progress = None
+
+        worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(on_finished)
+        worker.signals.error.connect(on_error)
+        worker.signals.cancelled.connect(on_cancelled)
+        self.search_pool.start(worker)
+
+    def _apply_downloaded_update(self, file_path: Path) -> None:
+        if sys.platform.startswith("win"):
+            self._apply_downloaded_update_windows(file_path)
+        elif sys.platform == "darwin":
+            self._apply_downloaded_update_macos(file_path)
+        else:
+            QMessageBox.information(
+                self,
+                "Update heruntergeladen",
+                f"Update wurde heruntergeladen:\n{file_path}\n\nBitte manuell installieren.",
+            )
+
+    def _apply_downloaded_update_macos(self, file_path: Path) -> None:
+        is_frozen = bool(getattr(sys, "frozen", False))
+        if not is_frozen:
+            QMessageBox.information(
+                self,
+                "Update heruntergeladen",
+                f"Update wurde heruntergeladen:\n{file_path}\n\nEntwicklungsmodus: manuelle Installation.",
+            )
+            return
+
+        current_exe = Path(sys.executable).resolve()
+        current_bundle = current_exe.parents[2]
+        if not str(current_bundle).endswith(".app"):
+            QMessageBox.information(
+                self,
+                "Update heruntergeladen",
+                f"Update wurde heruntergeladen:\n{file_path}\n\nBitte manuell installieren.",
+            )
+            return
+
+        if file_path.suffix.lower() != ".zip":
+            QMessageBox.warning(self, "Update", "Unbekanntes Update-Format.")
+            return
+
+        extract_dir = file_path.with_suffix("")
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(file_path, "r") as archive:
+                archive.extractall(extract_dir)
+        except Exception as exc:
+            QMessageBox.warning(self, "Update", f"Entpacken fehlgeschlagen:\n{exc}")
+            return
+
+        app_bundles = list(extract_dir.glob("*.app"))
+        if not app_bundles:
+            QMessageBox.information(
+                self,
+                "Update heruntergeladen",
+                f"Update wurde heruntergeladen:\n{file_path}\n\nBitte manuell installieren.",
+            )
+            return
+
+        new_bundle = app_bundles[0]
+        updater_sh = file_path.parent / "apply_update.sh"
+        script = (
+            "#!/bin/sh\n"
+            "set -e\n"
+            'APP_PID="$1"\n'
+            'BUNDLE_PATH="$2"\n'
+            'NEW_BUNDLE="$3"\n'
+            'while kill -0 "$APP_PID" 2>/dev/null; do\n'
+            "    sleep 0.5\n"
+            "done\n"
+            'rm -rf "$BUNDLE_PATH"\n'
+            'cp -r "$NEW_BUNDLE" "$BUNDLE_PATH"\n'
+            'open "$BUNDLE_PATH"\n'
+        )
+        updater_sh.write_text(script, encoding="utf-8")
+        updater_sh.chmod(0o755)
+        subprocess.Popen(
+            [str(updater_sh), str(os.getpid()), str(current_bundle), str(new_bundle)],
+            start_new_session=True,
+        )
+        QMessageBox.information(
+            self, "Update", "Update wird installiert. Die App wird neu gestartet."
+        )
+        self.close()
+
+    def _apply_downloaded_update_windows(self, file_path: Path) -> None:
+        is_frozen = bool(getattr(sys, "frozen", False))
+        if not is_frozen:
+            QMessageBox.information(
+                self,
+                "Update heruntergeladen",
+                f"Update wurde heruntergeladen:\n{file_path}\n\nEntwicklungsmodus: manuelle Installation.",
+            )
+            return
+
+        current_exe = Path(sys.executable).resolve()
+        if file_path.suffix.lower() == ".zip":
+            extract_dir = file_path.with_suffix("")
+            if extract_dir.exists():
+                for child in extract_dir.glob("*"):
+                    if child.is_file():
+                        child.unlink(missing_ok=True)
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(file_path, "r") as archive:
+                archive.extractall(extract_dir)
+            candidate = extract_dir / current_exe.name
+            if not candidate.exists():
+                exe_files = list(extract_dir.rglob("*.exe"))
+                if not exe_files:
+                    QMessageBox.warning(self, "Update", "Keine EXE im Update-Paket gefunden.")
+                    return
+                candidate = exe_files[0]
+            new_exe = candidate
+        elif file_path.suffix.lower() == ".exe":
+            new_exe = file_path
+        else:
+            QMessageBox.warning(self, "Update", "Unbekanntes Update-Format.")
+            return
+
+        updater_bat = file_path.parent / "apply_update.bat"
+        bat_content = (
+            "@echo off\n"
+            "setlocal\n"
+            f"set TARGET={current_exe}\n"
+            f"set SOURCE={new_exe}\n"
+            f"set PID={os.getpid()}\n"
+            ":waitloop\n"
+            'tasklist /FI "PID eq %PID%" | find "%PID%" >nul\n'
+            "if not errorlevel 1 (\n"
+            "  timeout /t 1 /nobreak >nul\n"
+            "  goto waitloop\n"
+            ")\n"
+            'copy /Y "%SOURCE%" "%TARGET%" >nul\n'
+            'start "" "%TARGET%"\n'
+            "exit /b 0\n"
+        )
+        updater_bat.write_text(bat_content, encoding="utf-8")
+        creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+        subprocess.Popen(["cmd", "/c", str(updater_bat)], creationflags=creationflags)
+        QMessageBox.information(
+            self, "Update", "Update wird installiert. Die App wird neu gestartet."
+        )
+        self.close()
 
     def _search(self, query: str) -> None:
         self._start_search(query.strip())
