@@ -76,6 +76,16 @@ from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
 PIN_LENGTH = 4
 TOOLBAR_ICON_SIZE = 26
+HISTORY_FIELD_ORDER = [
+    "de",
+    "en",
+    "de_desc",
+    "en_desc",
+    "annotations",
+    "synonyms",
+    "chapter_ids",
+    "image",
+]
 
 
 class SearchWorkerSignals(QObject):
@@ -108,22 +118,32 @@ class SearchWorker(QRunnable):
 
 
 class UpdateCheckWorkerSignals(QObject):
-    finished = Signal(object)  # UpdateCheckResult | Exception
+    finished = Signal(
+        object, bool, bool
+    )  # UpdateCheckResult | Exception, show_no_update, show_errors
 
 
 class UpdateCheckWorker(QRunnable):
-    def __init__(self, service: GitHubUpdateService, current_version: str) -> None:
+    def __init__(
+        self,
+        service: GitHubUpdateService,
+        current_version: str,
+        show_no_update: bool,
+        show_errors: bool,
+    ) -> None:
         super().__init__()
         self.service = service
         self.current_version = current_version
+        self.show_no_update = show_no_update
+        self.show_errors = show_errors
         self.signals = UpdateCheckWorkerSignals()
 
     def run(self) -> None:
         try:
-            result = self.service.check_for_update(self.current_version)
-            self.signals.finished.emit(result)
+            result: object = self.service.check_for_update(self.current_version)
         except Exception as exc:
-            self.signals.finished.emit(exc)
+            result = exc
+        self.signals.finished.emit(result, self.show_no_update, self.show_errors)
 
 
 class DownloadWorkerSignals(QObject):
@@ -217,7 +237,6 @@ class ChapterDialog(QDialog):
         )
 
 
-
 class RecommendationDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -244,7 +263,9 @@ class RecommendationDialog(QDialog):
     def _submit(self) -> None:
         if not self.de_input.text().strip() and not self.en_input.text().strip():
             QMessageBox.warning(
-                self, "Fehlende Felder", "Bitte mindestens einen Begriff (Deutsch oder Englisch) eingeben."
+                self,
+                "Fehlende Felder",
+                "Bitte mindestens einen Begriff (Deutsch oder Englisch) eingeben.",
             )
             return
         self.accept()
@@ -427,7 +448,9 @@ class MainWindow(QMainWindow):
         self._load_lock_icons()
         self._review_recommendations_action = QAction("Vorschläge prüfen", self)
         self._review_recommendations_action.setIcon(self.notification_icon)
-        self._review_recommendations_action.triggered.connect(self._on_review_recommendations_clicked)
+        self._review_recommendations_action.triggered.connect(
+            self._on_review_recommendations_clicked
+        )
         self._review_recommendations_action.setVisible(False)
         top.addAction(self._review_recommendations_action)
 
@@ -805,8 +828,12 @@ class MainWindow(QMainWindow):
         assets_dir = Path(__file__).resolve().parents[1] / "assets"
         locked_svg = assets_dir / "lock-closed.svg"
         unlocked_svg = assets_dir / "lock-open.svg"
-        self.lock_icon = self._colored_svg_icon(locked_svg, QColor("#DC2626"), size=TOOLBAR_ICON_SIZE)  # red
-        self.unlock_icon = self._colored_svg_icon(unlocked_svg, QColor("#16A34A"), size=TOOLBAR_ICON_SIZE)  # green
+        self.lock_icon = self._colored_svg_icon(
+            locked_svg, QColor("#DC2626"), size=TOOLBAR_ICON_SIZE
+        )  # red
+        self.unlock_icon = self._colored_svg_icon(
+            unlocked_svg, QColor("#16A34A"), size=TOOLBAR_ICON_SIZE
+        )  # green
         notification_svg = assets_dir / "notification.svg"
         self.notification_icon = self._colored_svg_icon(
             notification_svg, QColor("#9CA3AF"), size=TOOLBAR_ICON_SIZE
@@ -1208,10 +1235,11 @@ class MainWindow(QMainWindow):
         self._check_for_updates(show_no_update=True, show_errors=True)
 
     def _check_for_updates(self, show_no_update: bool, show_errors: bool) -> None:
-        worker = UpdateCheckWorker(self.update_service, self.config.app_version)
-        worker.signals.finished.connect(
-            lambda result: self._on_update_check_finished(result, show_no_update, show_errors)
+        worker = UpdateCheckWorker(
+            self.update_service, self.config.app_version, show_no_update, show_errors
         )
+        # Bound-Method-Slot: Qt queued den Aufruf in den Main-Thread (GUI-sicher).
+        worker.signals.finished.connect(self._on_update_check_finished)
         self.search_pool.start(worker)
 
     def _on_update_check_finished(
@@ -1273,39 +1301,37 @@ class MainWindow(QMainWindow):
 
         target_dir = Path(tempfile.gettempdir()) / "terminology_manager_updates" / latest_version
         worker = DownloadWorker(self.update_service, url, target_dir, cancel_event)
-
-        def on_progress(read_bytes: int, total_bytes: int) -> None:
-            if self._update_progress is None:
-                return
-            if total_bytes > 0:
-                self._update_progress.setValue(min(100, int(read_bytes * 100 / total_bytes)))
-            else:
-                self._update_progress.setValue(0)
-
-        def on_finished(file_path: object) -> None:
-            if self._update_progress is not None:
-                self._update_progress.setValue(100)
-                self._update_progress.close()
-                self._update_progress = None
-            if isinstance(file_path, Path):
-                self._apply_downloaded_update(file_path)
-
-        def on_error(message: str) -> None:
-            if self._update_progress is not None:
-                self._update_progress.close()
-                self._update_progress = None
-            QMessageBox.warning(self, "Update-Download fehlgeschlagen", message)
-
-        def on_cancelled() -> None:
-            if self._update_progress is not None:
-                self._update_progress.close()
-                self._update_progress = None
-
-        worker.signals.progress.connect(on_progress)
-        worker.signals.finished.connect(on_finished)
-        worker.signals.error.connect(on_error)
-        worker.signals.cancelled.connect(on_cancelled)
+        # Bound-Method-Slots: Qt queued die Aufrufe in den Main-Thread (GUI-sicher).
+        worker.signals.progress.connect(self._on_update_download_progress)
+        worker.signals.finished.connect(self._on_update_download_finished)
+        worker.signals.error.connect(self._on_update_download_error)
+        worker.signals.cancelled.connect(self._on_update_download_cancelled)
         self.search_pool.start(worker)
+
+    def _on_update_download_progress(self, read_bytes: int, total_bytes: int) -> None:
+        if self._update_progress is None:
+            return
+        if total_bytes > 0:
+            self._update_progress.setValue(min(100, int(read_bytes * 100 / total_bytes)))
+        else:
+            self._update_progress.setValue(0)
+
+    def _close_update_progress(self) -> None:
+        if self._update_progress is not None:
+            self._update_progress.close()
+            self._update_progress = None
+
+    def _on_update_download_finished(self, file_path: object) -> None:
+        self._close_update_progress()
+        if isinstance(file_path, Path):
+            self._apply_downloaded_update(file_path)
+
+    def _on_update_download_error(self, message: str) -> None:
+        self._close_update_progress()
+        QMessageBox.warning(self, "Update-Download fehlgeschlagen", message)
+
+    def _on_update_download_cancelled(self) -> None:
+        self._close_update_progress()
 
     def _apply_downloaded_update(self, file_path: Path) -> None:
         if sys.platform.startswith("win"):
@@ -2167,32 +2193,57 @@ class MainWindow(QMainWindow):
             for rec in records
             if self._history_has_visible_change(rec.action, rec.before_json, rec.after_json)
         ]
+        self._history_chapter_names = {c.id: c.name_de for c in self.service.list_chapters()}
         dlg = QDialog(self)
         dlg.setWindowTitle("Versionshistorie")
-        dlg.resize(980, 620)
+        dlg.resize(1000, 640)
         layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         if not records:
-            browser = QTextBrowser(dlg)
-            browser.setText("Keine relevanten Historieneinträge vorhanden")
-            layout.addWidget(browser)
+            empty = QLabel("Keine relevanten Historieneinträge vorhanden", dlg)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet("color: #9CA3AF; font-size: 14px;")
+            layout.addWidget(empty, 1)
         else:
             splitter = QSplitter(Qt.Orientation.Horizontal, dlg)
             event_list = QListWidget(splitter)
-            event_list.setMinimumWidth(350)
+            event_list.setMinimumWidth(340)
+            event_list.setSpacing(2)
             details = QTextBrowser(splitter)
+            details.document().setDocumentMargin(14)
             splitter.addWidget(event_list)
             splitter.addWidget(details)
-            splitter.setSizes([380, 600])
-            layout.addWidget(splitter)
+            splitter.setSizes([360, 640])
+            layout.addWidget(splitter, 1)
 
             for rec in records:
-                summary = self._history_summary(rec.action, rec.before_json, rec.after_json)
-                action = self._history_action_label(rec.action)
-                timestamp = rec.changed_at.strftime("%d.%m.%Y %H:%M:%S")
-                item = QListWidgetItem(f"{timestamp} | {action}\n{summary}")
+                item = QListWidgetItem(event_list)
                 item.setData(Qt.ItemDataRole.UserRole, rec)
-                event_list.addItem(item)
+                row = QWidget(event_list)
+                row_layout = QVBoxLayout(row)
+                row_layout.setContentsMargins(10, 8, 10, 8)
+                row_layout.setSpacing(3)
+                head = QHBoxLayout()
+                head.setSpacing(8)
+                action_label = QLabel(self._history_action_label(rec.action), row)
+                action_label.setStyleSheet(
+                    f"color: {self._history_action_color(rec.action)}; font-weight: 700;"
+                )
+                date_label = QLabel(rec.changed_at.strftime("%d.%m.%Y %H:%M"), row)
+                date_label.setStyleSheet("color: #9CA3AF;")
+                head.addWidget(action_label)
+                head.addStretch(1)
+                head.addWidget(date_label)
+                summary_label = QLabel(
+                    self._history_summary(rec.action, rec.before_json, rec.after_json), row
+                )
+                summary_label.setStyleSheet("color: #9CA3AF;")
+                row_layout.addLayout(head)
+                row_layout.addWidget(summary_label)
+                item.setSizeHint(row.sizeHint())
+                event_list.setItemWidget(item, row)
 
             def on_select() -> None:
                 selected = event_list.currentItem()
@@ -2208,9 +2259,12 @@ class MainWindow(QMainWindow):
             event_list.itemSelectionChanged.connect(on_select)
             event_list.setCurrentRow(0)
 
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
         btn = QPushButton("Schließen", dlg)
         btn.clicked.connect(dlg.accept)
-        layout.addWidget(btn)
+        button_row.addWidget(btn)
+        layout.addLayout(button_row)
         dlg.exec()
 
     def _history_action_label(self, action: str) -> str:
@@ -2220,6 +2274,25 @@ class MainWindow(QMainWindow):
             "delete": "Gelöscht",
         }.get(action, action)
 
+    def _history_action_color(self, action: str) -> str:
+        return {
+            "create": "#16A34A",
+            "update": "#2563EB",
+            "delete": "#DC2626",
+        }.get(action, "#9CA3AF")
+
+    def _history_field_label(self, field: str) -> str:
+        return {
+            "de": "Begriff (DE)",
+            "en": "Begriff (EN)",
+            "de_desc": "Beschreibung (DE)",
+            "en_desc": "Beschreibung (EN)",
+            "annotations": "Anmerkungen",
+            "synonyms": "Synonyme",
+            "chapter_ids": "Kapitel",
+            "image": "Bild",
+        }.get(field, field)
+
     def _history_summary(self, action: str, before_json: str | None, after_json: str | None) -> str:
         changes = self._history_changes(before_json, after_json)
         if action == "create":
@@ -2228,10 +2301,37 @@ class MainWindow(QMainWindow):
             return "Eintrag wurde gelöscht."
         if not changes:
             return "Keine Feldänderungen erkannt."
-        names = ", ".join(change[0] for change in changes[:4])
-        if len(changes) > 4:
-            names += f" (+{len(changes) - 4} weitere)"
-        return f"Geänderte Felder: {names}"
+        names = ", ".join(self._history_field_label(change[0]) for change in changes[:3])
+        if len(changes) > 3:
+            names += f" (+{len(changes) - 3} weitere)"
+        return f"Geändert: {names}"
+
+    def _history_colors(self) -> dict[str, str]:
+        is_dark = self.palette().window().color().lightness() < 128
+        if is_dark:
+            return {
+                "muted": "#9CA3AF",
+                "head_bg": "#374151",
+                "head_fg": "#E5E7EB",
+                "old_bg": "#42201F",
+                "old_fg": "#FCA5A5",
+                "new_bg": "#14352A",
+                "new_fg": "#86EFAC",
+                "row_bg": "#1F2937",
+            }
+        return {
+            "muted": "#6B7280",
+            "head_bg": "#F3F4F6",
+            "head_fg": "#111827",
+            "old_bg": "#FEF2F2",
+            "old_fg": "#B91C1C",
+            "new_bg": "#F0FDF4",
+            "new_fg": "#15803D",
+            "row_bg": "#FAFAFA",
+        }
+
+    def _history_html_value(self, field: str, value: Any) -> str:
+        return html.escape(self._history_value_str(field, value)).replace("\n", "<br/>")
 
     def _history_details_html(
         self,
@@ -2244,54 +2344,71 @@ class MainWindow(QMainWindow):
         before_data = self._history_parse_json(before_json)
         after_data = self._history_parse_json(after_json)
         changes = self._history_changes(before_json, after_json)
-        header = f"<h3>{self._history_action_label(action)} am {timestamp}</h3>"
+        colors = self._history_colors()
+        header = (
+            f"<p><span style='font-size:16px; font-weight:700; "
+            f"color:{self._history_action_color(action)};'>"
+            f"{self._history_action_label(action)}</span>"
+            f"&nbsp;&nbsp;<span style='color:{colors['muted']};'>am {timestamp}</span></p>"
+        )
 
-        if action == "create":
-            rows = "".join(
-                f"<tr><td><b>{html.escape(k)}</b></td><td>{html.escape(self._history_value_str(v))}</td></tr>"
-                for k, v in sorted(after_data.items())
-                if k not in {"image_b64"}
-            )
+        if action in {"create", "delete"}:
+            data = after_data if action == "create" else before_data
+            intro = "Neuer Datensatz" if action == "create" else "Gelöschter Datensatz"
+            rows = []
+            for field in HISTORY_FIELD_ORDER:
+                if field not in data:
+                    continue
+                value = self._history_html_value(field, data.get(field))
+                if value == "—":
+                    continue
+                rows.append(
+                    "<tr>"
+                    f"<td width='170' bgcolor='{colors['row_bg']}'>"
+                    f"<b>{self._history_field_label(field)}</b></td>"
+                    f"<td>{value}</td>"
+                    "</tr>"
+                )
+            image_b64 = data.get("image_b64")
             return (
                 header
-                + "<p>Neuer Datensatz:</p><table>"
-                + rows
+                + f"<p style='color:{colors['muted']};'>{intro}:</p>"
+                + "<table width='100%' cellspacing='0' cellpadding='8' border='0'>"
+                + "".join(rows)
                 + "</table>"
-                + self._history_image_preview_block(None, after_data.get("image_b64"))
-            )
-
-        if action == "delete":
-            rows = "".join(
-                f"<tr><td><b>{html.escape(k)}</b></td><td>{html.escape(self._history_value_str(v))}</td></tr>"
-                for k, v in sorted(before_data.items())
-                if k not in {"image_b64"}
-            )
-            return (
-                header
-                + "<p>Gelöschter Datensatz:</p><table>"
-                + rows
-                + "</table>"
-                + self._history_image_preview_block(before_data.get("image_b64"), None)
+                + self._history_image_preview_block(
+                    image_b64 if action == "delete" else None,
+                    image_b64 if action == "create" else None,
+                )
             )
 
         if not changes:
             return header + "<p>Keine darstellbaren Änderungen.</p>"
 
-        rows = "".join(
-            (
+        rows = [
+            "<tr>"
+            f"<th align='left' bgcolor='{colors['head_bg']}' width='170'>"
+            f"<span style='color:{colors['head_fg']};'>Feld</span></th>"
+            f"<th align='left' bgcolor='{colors['head_bg']}'>"
+            f"<span style='color:{colors['head_fg']};'>Vorher</span></th>"
+            f"<th align='left' bgcolor='{colors['head_bg']}'>"
+            f"<span style='color:{colors['head_fg']};'>Nachher</span></th>"
+            "</tr>"
+        ]
+        for field, old, new in changes:
+            rows.append(
                 "<tr>"
-                f"<td><b>{html.escape(field)}</b></td>"
-                f"<td>{html.escape(self._history_value_str(old))}</td>"
-                f"<td>{html.escape(self._history_value_str(new))}</td>"
+                f"<td bgcolor='{colors['row_bg']}'><b>{self._history_field_label(field)}</b></td>"
+                f"<td bgcolor='{colors['old_bg']}'><span style='color:{colors['old_fg']};'>"
+                f"{self._history_html_value(field, old)}</span></td>"
+                f"<td bgcolor='{colors['new_bg']}'><span style='color:{colors['new_fg']};'>"
+                f"{self._history_html_value(field, new)}</span></td>"
                 "</tr>"
             )
-            for field, old, new in changes
-        )
         return_html = (
             header
-            + "<table border='0' cellspacing='6'>"
-            + "<tr><th align='left'>Feld</th><th align='left'>Vorher</th><th align='left'>Nachher</th></tr>"
-            + rows
+            + "<table width='100%' cellspacing='0' cellpadding='8' border='0'>"
+            + "".join(rows)
             + "</table>"
         )
         before_image = before_data.get("image_b64")
@@ -2305,8 +2422,12 @@ class MainWindow(QMainWindow):
     ) -> list[tuple[str, Any, Any]]:
         before = self._history_parse_json(before_json)
         after = self._history_parse_json(after_json)
-        ignored = {"updated_at", "image_b64"}
-        fields = sorted((set(before.keys()) | set(after.keys())) - ignored)
+        ignored = {"id", "created_at", "updated_at", "image_b64"}
+        order = {field: i for i, field in enumerate(HISTORY_FIELD_ORDER)}
+        fields = sorted(
+            (set(before.keys()) | set(after.keys())) - ignored,
+            key=lambda f: (order.get(f, len(order)), f),
+        )
         changes: list[tuple[str, Any, Any]] = []
         for field in fields:
             old = before.get(field)
@@ -2324,15 +2445,30 @@ class MainWindow(QMainWindow):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _history_value_str(self, value: Any) -> str:
+    def _history_value_str(self, field: str, value: Any) -> str:
+        if field == "synonyms" and isinstance(value, list):
+            parts = [
+                f"{entry.get('synonym', '')} ({entry.get('lang', '')})"
+                for entry in value
+                if isinstance(entry, dict) and str(entry.get("synonym", "")).strip()
+            ]
+            return ", ".join(parts) if parts else "—"
+        if field == "chapter_ids" and isinstance(value, list):
+            names = [
+                getattr(self, "_history_chapter_names", {}).get(cid, f"Kapitel #{cid}")
+                for cid in value
+            ]
+            return ", ".join(names) if names else "—"
+        if field == "image":
+            return "vorhanden" if value else "—"
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "—"
+        if isinstance(value, bool):
+            return "Ja" if value else "Nein"
         if isinstance(value, list):
             return f"{len(value)} Einträge"
         if isinstance(value, dict):
             return json.dumps(value, ensure_ascii=False)
-        if value is None:
-            return "—"
-        if isinstance(value, bool):
-            return "Ja" if value else "Nein"
         return str(value)
 
     def _history_has_visible_change(

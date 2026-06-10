@@ -42,8 +42,9 @@ class GitHubUpdateService:
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Update check failed: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            # OSError deckt URLError und Timeouts ab, ValueError den JSON-Parse-Fehler.
+            raise RuntimeError(f"Update-Prüfung fehlgeschlagen: {exc}") from exc
 
         latest_tag = str(payload.get("tag_name", "")).strip() or "v0.0.0"
         latest_version = latest_tag.lstrip("vV")

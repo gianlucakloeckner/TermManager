@@ -37,8 +37,14 @@ def main() -> int:
         icon_path = assets_dir / "app_icon.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
-    app.setStyleSheet("""
-        QWidget { font-family: 'Segoe UI'; font-size: 12px; }
+    # "Segoe UI" gibt es nur auf Windows; anderswo Systemschrift nutzen,
+    # sonst baut Qt beim Start teuer die Font-Alias-Tabelle auf.
+    font_rule = (
+        "QWidget { font-family: 'Segoe UI'; font-size: 12px; }"
+        if sys.platform == "win32"
+        else "QWidget { font-size: 12px; }"
+    )
+    app.setStyleSheet(font_rule + """
         QMainWindow { background: #15171A; }
         QLineEdit, QTextEdit, QTreeWidget, QTableWidget, QListWidget, QTextBrowser {
             background: #1F242B; color: #E6EAF0; border: 1px solid #2C3440; border-radius: 6px;
