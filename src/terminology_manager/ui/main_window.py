@@ -1680,23 +1680,37 @@ class MainWindow(QMainWindow):
             return
 
         updater_bat = file_path.parent / "apply_update.bat"
+        # PyInstaller-Onefile: Der Bootloader-Prozess hält die EXE auch nach dem
+        # Ende des Python-Kindprozesses (unsere PID) noch gesperrt, bis das
+        # Temp-Verzeichnis aufgeräumt ist. Deshalb wird das Kopieren wiederholt,
+        # bis das Datei-Lock weg ist (max. ~2 Minuten).
+        # "timeout" bricht ohne Konsole (DETACHED_PROCESS) sofort ab; "ping" als
+        # Sleep-Ersatz funktioniert auch ohne Konsole.
         bat_content = (
             "@echo off\n"
             "setlocal\n"
-            f"set TARGET={current_exe}\n"
-            f"set SOURCE={new_exe}\n"
-            f"set PID={os.getpid()}\n"
+            f'set "TARGET={current_exe}"\n'
+            f'set "SOURCE={new_exe}"\n'
+            f'set "PID={os.getpid()}"\n'
+            "set ATTEMPTS=0\n"
             ":waitloop\n"
             'tasklist /FI "PID eq %PID%" | find "%PID%" >nul\n'
-            "if not errorlevel 1 (\n"
-            "  timeout /t 1 /nobreak >nul\n"
-            "  goto waitloop\n"
-            ")\n"
-            'copy /Y "%SOURCE%" "%TARGET%" >nul\n'
+            "if errorlevel 1 goto copyloop\n"
+            "ping 127.0.0.1 -n 2 >nul\n"
+            "goto waitloop\n"
+            ":copyloop\n"
+            'copy /Y "%SOURCE%" "%TARGET%" >nul 2>&1\n'
+            "if not errorlevel 1 goto launch\n"
+            "set /a ATTEMPTS+=1\n"
+            "if %ATTEMPTS% GEQ 120 goto launch\n"
+            "ping 127.0.0.1 -n 2 >nul\n"
+            "goto copyloop\n"
+            ":launch\n"
             'start "" "%TARGET%"\n'
             "exit /b 0\n"
         )
-        updater_bat.write_text(bat_content, encoding="utf-8")
+        # cmd.exe erwartet CRLF; reine LF-Endungen brechen u.a. goto-Label-Scans.
+        updater_bat.write_text(bat_content, encoding="utf-8", newline="\r\n")
         creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
             getattr(subprocess, "DETACHED_PROCESS", 0)
         )
