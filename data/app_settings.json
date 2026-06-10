@@ -1,3 +1,6 @@
 {
-  "database_path": "data/terminology.sqlite3"
+  "database_path": "data/terminology.sqlite3",
+  "update_repo_owner": "gianlucakloeckner",
+  "update_repo_name": "TermManager",
+  "auto_update_check": true
 }

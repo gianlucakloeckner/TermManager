@@ -11,6 +11,7 @@ from terminology_manager.persistence.database import session_scope
 from terminology_manager.persistence.models import Chapter
 from terminology_manager.persistence.repositories import (
     ChapterRepository,
+    TermRecommendationRepository,
     TermRepository,
     TermUpsert,
     VersionRepository,
@@ -295,3 +296,39 @@ class TerminologyService:
     def history_for_term(self, term_id: int) -> list[VersionRecord]:
         with session_scope(self.session_factory) as session:
             return VersionRepository(session).list_for_entity("term", term_id)
+
+    def submit_recommendation(self, de: str, en: str) -> int:
+        if not de.strip() and not en.strip():
+            raise ValueError("Mindestens ein Begriff (DE oder EN) ist erforderlich")
+        with session_scope(self.session_factory) as session:
+            rec = TermRecommendationRepository(session).create(de, en)
+            return rec.id
+
+    def list_pending_recommendations(self) -> list[dict[str, Any]]:
+        with session_scope(self.session_factory) as session:
+            recs = TermRecommendationRepository(session).list_pending()
+            return [
+                {
+                    "id": r.id,
+                    "de": r.de,
+                    "en": r.en,
+                    "created_at": r.created_at.isoformat() if r.created_at else "",
+                }
+                for r in recs
+            ]
+
+    def accept_recommendation(self, rec_id: int) -> int:
+        with session_scope(self.session_factory) as session:
+            rec = TermRecommendationRepository(session).accept(rec_id)
+            term = TermRepository(session).create(
+                TermUpsert(de=rec.de, en=rec.en, de_desc="", en_desc="", annotations="", image=None)
+            )
+            return term.id
+
+    def deny_recommendation(self, rec_id: int) -> None:
+        with session_scope(self.session_factory) as session:
+            TermRecommendationRepository(session).deny(rec_id)
+
+    def count_pending_recommendations(self) -> int:
+        with session_scope(self.session_factory) as session:
+            return TermRecommendationRepository(session).count_pending()
