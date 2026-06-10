@@ -25,6 +25,10 @@ def create_sqlite_engine(database_url: str) -> Engine:
 def initialize_database(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        term_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(terms)")).fetchall()]
+        if "annotations" not in term_cols:
+            conn.execute(text("ALTER TABLE terms ADD COLUMN annotations TEXT NOT NULL DEFAULT ''"))
+
         chapter_cols = [
             row[1] for row in conn.execute(text("PRAGMA table_info(chapters)")).fetchall()
         ]
@@ -33,6 +37,8 @@ def initialize_database(engine: Engine) -> None:
                     ALTER TABLE chapters
                     ADD COLUMN parent_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL
                     """))
+
+        conn.execute(text("DROP TABLE IF EXISTS annotations"))
 
         conn.execute(text("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS term_fts USING fts5(

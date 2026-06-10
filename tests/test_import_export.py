@@ -11,9 +11,9 @@ def _sample_rows() -> list[dict]:
             "en": "Engine",
             "de_desc": "Beschreibung",
             "en_desc": "Description",
+            "annotations": "Hinweis",
             "chapter_ids": [1],
             "synonyms": [{"lang": "de", "synonym": "Antrieb", "allowed": True}],
-            "annotations": [{"lang": "de", "note": "Hinweis", "allowed": True}],
         }
     ]
 

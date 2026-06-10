@@ -250,7 +250,16 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         top = QToolBar("Menü")
         top.setMovable(False)
+        top.setFixedHeight(64)
         self.addToolBar(top)
+
+        logo_label = QLabel(self)
+        logo_pixmap = self._toolbar_logo_pixmap(width=180, height=52)
+        if not logo_pixmap.isNull():
+            logo_label.setPixmap(logo_pixmap)
+            logo_label.setFixedSize(188, 56)
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            top.addWidget(logo_label)
 
         top.addSeparator()
         self.btn_new = QAction("Neuer Begriff", self)
@@ -323,15 +332,17 @@ class MainWindow(QMainWindow):
         self.sidebar_term_tree.setHeaderHidden(True)
         self.sidebar_term_tree.setRootIsDecorated(True)
         self.sidebar_term_tree.setIndentation(16)
+        self.sidebar_term_tree.setAlternatingRowColors(False)
         self.sidebar_term_tree.itemSelectionChanged.connect(self._on_sidebar_term_selected)
         sidebar_layout.addWidget(self.sidebar_term_tree, 1)
-        main_layout.addWidget(sidebar, 1)
+        sidebar.setMinimumWidth(320)
+        main_layout.addWidget(sidebar, 2)
 
         content = QWidget(self)
         content_layout = QHBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(12)
-        main_layout.addWidget(content, 4)
+        main_layout.addWidget(content, 5)
 
         left_panel = QWidget(self)
         left_layout = QVBoxLayout(left_panel)
@@ -343,7 +354,7 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        content_layout.addWidget(left_panel, 2)
+        content_layout.addWidget(left_panel, 3)
         content_layout.addWidget(right_panel, 1)
 
         form = QWidget(self)
@@ -358,10 +369,14 @@ class MainWindow(QMainWindow):
         self.term_en_desc.setMinimumWidth(620)
         self.term_de_desc.setMaximumHeight(90)
         self.term_en_desc.setMaximumHeight(90)
+        self.annotations_text = QTextEdit(self)
+        self.annotations_text.setMinimumWidth(620)
+        self.annotations_text.setMaximumHeight(110)
         form_layout.addRow("Deutsch", self.term_de)
         form_layout.addRow("Englisch", self.term_en)
         form_layout.addRow("Beschreibung (DE)", self.term_de_desc)
         form_layout.addRow("Beschreibung (EN)", self.term_en_desc)
+        form_layout.addRow("Anmerkungen", self.annotations_text)
         left_layout.addWidget(form)
 
         image_panel = QWidget(self)
@@ -431,36 +446,12 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(syn_buttons)
         left_layout.addWidget(self.syn_table, 1)
 
-        self.ann_table = QTableWidget(self)
-        self.ann_table.setColumnCount(2)
-        self.ann_table.setHorizontalHeaderLabels(["Anmerkung", "Zugelassen"])
-        self.ann_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.ann_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self.ann_table.setColumnWidth(1, 44)
-        self.ann_table.verticalHeader().setVisible(False)
-        self.ann_table.setCornerButtonEnabled(False)
-        left_layout.addWidget(QLabel("Anmerkungen"))
-        ann_buttons = QHBoxLayout()
-        self.btn_ann_add = QPushButton("+", self)
-        self.btn_ann_del = QPushButton("-", self)
-        self.btn_ann_add.clicked.connect(lambda: self._append_table_row(self.ann_table, ["", "1"]))
-        self.btn_ann_del.clicked.connect(lambda: self._remove_selected_table_row(self.ann_table))
-        ann_buttons.addWidget(self.btn_ann_add)
-        ann_buttons.addWidget(self.btn_ann_del)
-        ann_buttons.addStretch(1)
-        left_layout.addLayout(ann_buttons)
-        left_layout.addWidget(self.ann_table, 1)
-
         self.edit_buttons = [
             self.btn_pick_image,
             self.btn_edit_image,
             self.btn_clear_image,
             self.btn_syn_add,
             self.btn_syn_del,
-            self.btn_ann_add,
-            self.btn_ann_del,
         ]
         for button in self.edit_buttons:
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -656,6 +647,35 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
+    def _svg_pixmap(self, path: Path, width: int, height: int) -> QPixmap:
+        if not path.exists():
+            return QPixmap()
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return QPixmap()
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return pixmap
+
+    def _toolbar_logo_pixmap(self, width: int, height: int) -> QPixmap:
+        assets_dir = Path(__file__).resolve().parents[1] / "assets"
+        png_path = assets_dir / "k&z_logo.png"
+        if not png_path.exists():
+            return QPixmap()
+        pixmap = QPixmap(str(png_path))
+        if pixmap.isNull():
+            return QPixmap()
+        return pixmap.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
     def _load_chapters(self, selected_ids: list[int] | None = None) -> None:
         selected = set(selected_ids or [])
         filter_text = (
@@ -735,10 +755,10 @@ class MainWindow(QMainWindow):
             self.term_en,
             self.term_de_desc,
             self.term_en_desc,
+            self.annotations_text,
             self.chapter_filter_input,
             self.chapter_list,
             self.syn_table,
-            self.ann_table,
         ]:
             widget.setEnabled(unlocked)
 
@@ -1352,13 +1372,7 @@ class MainWindow(QMainWindow):
                 for s in term.get("synonyms", [])
             ],
         )
-        self._load_table(
-            self.ann_table,
-            rows=[
-                [str(a.get("note", "")), "1" if a.get("allowed", True) else "0"]
-                for a in term.get("annotations", [])
-            ],
-        )
+        self.annotations_text.setPlainText(str(term.get("annotations", "")))
 
         image_has_data = bool(term.get("image"))
         self.current_image_bytes = self._decode_image(term) if image_has_data else None
@@ -1447,9 +1461,9 @@ class MainWindow(QMainWindow):
         self.term_en.clear()
         self.term_de_desc.clear()
         self.term_en_desc.clear()
+        self.annotations_text.clear()
         self._load_chapters([])
         self.syn_table.setRowCount(0)
-        self.ann_table.setRowCount(0)
         self._refresh_image_preview()
 
     def _save_term(self) -> None:
@@ -1477,7 +1491,6 @@ class MainWindow(QMainWindow):
             collect_checked(root.child(i))
 
         synonyms_rows = self._table_rows(self.syn_table, "synonym")
-        annotations_rows = self._table_rows(self.ann_table, "note")
         duplicate_report = self.service.detect_duplicates(
             de,
             en,
@@ -1514,9 +1527,9 @@ class MainWindow(QMainWindow):
             en=en,
             de_desc=self.term_de_desc.toPlainText(),
             en_desc=self.term_en_desc.toPlainText(),
+            annotations=self.annotations_text.toPlainText(),
             image=self.current_image_bytes,
             synonyms=synonyms_rows,
-            annotations=annotations_rows,
             chapter_ids=chapter_ids,
         )
 
@@ -1839,16 +1852,15 @@ class MainWindow(QMainWindow):
                 if isinstance(image_b64, str) and image_b64:
                     image_bytes = base64.b64decode(image_b64)
                 synonyms = term.get("synonyms", [])
-                annotations = term.get("annotations", [])
                 self.service.save_term(
                     term_id=term_id,
                     de=str(term.get("de", "")),
                     en=str(term.get("en", "")),
                     de_desc=str(term.get("de_desc", "")),
                     en_desc=str(term.get("en_desc", "")),
+                    annotations=str(term.get("annotations", "")),
                     image=image_bytes,
                     synonyms=synonyms if isinstance(synonyms, list) else [],
-                    annotations=annotations if isinstance(annotations, list) else [],
                     chapter_ids=chapter_ids,
                 )
             self._load_chapters()

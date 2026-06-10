@@ -28,3 +28,8 @@ uv run black --check .
 uv run mypy src
 uv run pytest -q
 ```
+
+## Build
+```bash
+uv run pyinstaller TerminologyManager.spec --noconfirm
+```
