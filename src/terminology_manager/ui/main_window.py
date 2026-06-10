@@ -750,16 +750,16 @@ class MainWindow(QMainWindow):
         self.lock_action.setStatusTip(f"{self.lock_action.text()} (Ctrl+L)")
         self.lock_action.setToolTip(f"{self.lock_action.text()} (Ctrl+L)")
 
-        for widget in [
-            self.term_de,
-            self.term_en,
-            self.term_de_desc,
-            self.term_en_desc,
-            self.annotations_text,
-            self.chapter_filter_input,
-            self.chapter_list,
-            self.syn_table,
-        ]:
+        for line_edit in [self.term_de, self.term_en]:
+            line_edit.setReadOnly(not unlocked)
+        for text_edit in [self.term_de_desc, self.term_en_desc, self.annotations_text]:
+            text_edit.setReadOnly(not unlocked)
+        self.syn_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.AllEditTriggers
+            if unlocked
+            else QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        for widget in [self.chapter_filter_input, self.chapter_list]:
             widget.setEnabled(unlocked)
 
         for action in [
