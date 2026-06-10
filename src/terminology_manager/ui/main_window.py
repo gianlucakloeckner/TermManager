@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
         self.search_pool = QThreadPool.globalInstance()
         self.search_request_id = 0
         self._update_progress: QProgressDialog | None = None
+        self._sidebar_flat = False
 
         self._build_ui()
         self._refresh_all()
@@ -322,10 +323,21 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(8)
         sidebar_layout.addWidget(QLabel("Kapitel / Begriffe"))
 
+        filter_row = QWidget(self)
+        filter_row_layout = QHBoxLayout(filter_row)
+        filter_row_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row_layout.setSpacing(4)
         self.sidebar_tree_filter_input = QLineEdit(self)
         self.sidebar_tree_filter_input.setPlaceholderText("Kapitel filtern...")
         self.sidebar_tree_filter_input.textChanged.connect(self._on_sidebar_chapter_filter_changed)
-        sidebar_layout.addWidget(self.sidebar_tree_filter_input)
+        filter_row_layout.addWidget(self.sidebar_tree_filter_input, 1)
+        self.sidebar_sort_btn = QPushButton("A-Z", self)
+        self.sidebar_sort_btn.setCheckable(True)
+        self.sidebar_sort_btn.setFixedWidth(44)
+        self.sidebar_sort_btn.setToolTip("Alphabetische Liste ohne Gruppen anzeigen")
+        self.sidebar_sort_btn.toggled.connect(self._on_sidebar_flat_toggled)
+        filter_row_layout.addWidget(self.sidebar_sort_btn)
+        sidebar_layout.addWidget(filter_row)
 
         self.sidebar_term_tree = QTreeWidget(self)
         self.sidebar_term_tree.setColumnCount(1)
@@ -475,6 +487,17 @@ class MainWindow(QMainWindow):
             action.setStatusTip(f"{action.text()} ({sequence})")
             action.setToolTip(f"{action.text()} ({sequence})")
 
+    def _on_sidebar_flat_toggled(self, flat: bool) -> None:
+        self._sidebar_flat = flat
+        self.sidebar_sort_btn.setText("Kapitel" if flat else "A-Z")
+        self.sidebar_sort_btn.setToolTip(
+            "Kapitelstruktur anzeigen" if flat else "Alphabetische Liste ohne Gruppen anzeigen"
+        )
+        self.sidebar_tree_filter_input.setPlaceholderText(
+            "Begriff filtern..." if flat else "Kapitel filtern..."
+        )
+        self._refresh_term_sidebar()
+
     def _on_search_text_changed(self, _text: str) -> None:
         # Debounce verhindert UI-Blockaden bei schnellem Tippen.
         self.search_debounce.start(140)
@@ -491,6 +514,9 @@ class MainWindow(QMainWindow):
         self._search(self.search_input.text())
 
     def _refresh_term_sidebar(self) -> None:
+        if self._sidebar_flat:
+            self._refresh_term_sidebar_flat()
+            return
         chapter_filter = self.sidebar_tree_filter_input.text().strip().casefold()
         selected_term_id = self.current_term_id
         chapters = self.service.list_chapters()
@@ -588,6 +614,29 @@ class MainWindow(QMainWindow):
                     uncategorized.addChild(term_item)
 
             self.sidebar_term_tree.expandAll()
+            if isinstance(selected_term_id, int):
+                selected_item = self._find_sidebar_term_item(selected_term_id)
+                if selected_item is not None:
+                    self.sidebar_term_tree.setCurrentItem(selected_item)
+
+    def _refresh_term_sidebar_flat(self) -> None:
+        needle = self.sidebar_tree_filter_input.text().strip().casefold()
+        selected_term_id = self.current_term_id
+        terms = self.service.list_terms()
+        with QSignalBlocker(self.sidebar_term_tree):
+            self.sidebar_term_tree.clear()
+            for term in sorted(terms, key=lambda t: str(t.get("de", "")).casefold()):
+                de = str(term.get("de", ""))
+                en = str(term.get("en", ""))
+                if needle and needle not in de.casefold() and needle not in en.casefold():
+                    continue
+                term_id = term.get("id")
+                if not isinstance(term_id, int):
+                    continue
+                title = f"{de} | {en}".strip(" |")
+                item = QTreeWidgetItem([title])
+                item.setData(0, Qt.ItemDataRole.UserRole, term_id)
+                self.sidebar_term_tree.addTopLevelItem(item)
             if isinstance(selected_term_id, int):
                 selected_item = self._find_sidebar_term_item(selected_term_id)
                 if selected_item is not None:
