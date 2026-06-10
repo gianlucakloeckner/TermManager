@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -181,60 +182,291 @@ class DownloadWorker(QRunnable):
                 self.signals.error.emit(str(exc))
 
 
-class ChapterDialog(QDialog):
+class ChapterManagerDialog(QDialog):
+    """Master-Detail-Dialog: links Kapitelbaum, rechts Inline-Bearbeitung."""
+
     def __init__(
         self,
-        chapter: Chapter | None = None,
-        chapters: list[Chapter] | None = None,
+        service: TerminologyService,
+        on_changed: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Kapitel")
-        self.resize(460, 220)
+        self._service = service
+        self._on_changed = on_changed
+        self._chapters: list[Chapter] = []
+        self._edit_id: int | None = None  # None = neues Kapitel anlegen
 
-        form = QFormLayout(self)
-        self.name_de = QLineEdit(self)
-        self.name_en = QLineEdit(self)
-        self.visible = QCheckBox("In Suche sichtbar", self)
-        self.parent_combo = QComboBox(self)
-        self.visible.setChecked(True)
-        self.parent_combo.addItem("Kein Elternkapitel", None)
+        self.setWindowTitle("Kapitel verwalten")
+        self.resize(860, 560)
 
-        if chapter is not None:
-            self.name_de.setText(chapter.name_de)
-            self.name_en.setText(chapter.name_en)
-            self.visible.setChecked(chapter.visible)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+        content = QHBoxLayout()
+        content.setSpacing(12)
+        root.addLayout(content, 1)
 
-        for c in sorted(chapters or [], key=lambda x: x.name_de.casefold()):
-            if chapter is not None and c.id == chapter.id:
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        self._filter_input = QLineEdit(self)
+        self._filter_input.setPlaceholderText("Kapitel filtern …")
+        self._filter_input.textChanged.connect(lambda: self._rebuild_tree())
+        left.addWidget(self._filter_input)
+        self._tree = QTreeWidget(self)
+        self._tree.setHeaderHidden(True)
+        self._tree.setIndentation(18)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        left.addWidget(self._tree, 1)
+
+        tree_buttons = QHBoxLayout()
+        self._btn_new = QPushButton("Neues Kapitel", self)
+        self._btn_new_child = QPushButton("Neues Unterkapitel", self)
+        self._btn_delete = QPushButton("Löschen", self)
+        self._btn_new.clicked.connect(lambda: self._start_new())
+        self._btn_new_child.clicked.connect(self._start_new_child)
+        self._btn_delete.clicked.connect(self._delete_selected)
+        tree_buttons.addWidget(self._btn_new)
+        tree_buttons.addWidget(self._btn_new_child)
+        tree_buttons.addStretch(1)
+        tree_buttons.addWidget(self._btn_delete)
+        left.addLayout(tree_buttons)
+        content.addLayout(left, 1)
+
+        panel = QWidget(self)
+        panel.setFixedWidth(320)
+        right = QVBoxLayout(panel)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(10)
+        self._mode_label = QLabel("Neues Kapitel", panel)
+        self._mode_label.setStyleSheet("font-weight: 700; font-size: 14px;")
+        right.addWidget(self._mode_label)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._name_de = QLineEdit(panel)
+        self._name_de.setPlaceholderText("Kapitelname (Deutsch)")
+        self._name_en = QLineEdit(panel)
+        self._name_en.setPlaceholderText("Chapter name (English)")
+        self._parent_combo = QComboBox(panel)
+        self._visible = QCheckBox("In Suche sichtbar", panel)
+        self._visible.setChecked(True)
+        form.addRow("Name (DE)", self._name_de)
+        form.addRow("Name (EN)", self._name_en)
+        form.addRow("Elternkapitel", self._parent_combo)
+        form.addRow("", self._visible)
+        right.addLayout(form)
+
+        self._btn_save = QPushButton("Kapitel anlegen", panel)
+        self._btn_save.clicked.connect(self._save)
+        right.addWidget(self._btn_save)
+        hint = QLabel("Änderungen wirken sofort auf Sidebar und Suche.", panel)
+        hint.setStyleSheet("color: #9CA3AF;")
+        hint.setWordWrap(True)
+        right.addWidget(hint)
+        right.addStretch(1)
+        content.addWidget(panel)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        btn_close = QPushButton("Schließen", self)
+        btn_close.clicked.connect(self.accept)
+        bottom.addWidget(btn_close)
+        root.addLayout(bottom)
+
+        self._name_de.returnPressed.connect(self._save)
+        self._name_en.returnPressed.connect(self._save)
+
+        self._reload()
+        self._start_new()
+
+    def _reload(self, select_id: int | None = None) -> None:
+        self._chapters = self._service.list_chapters()
+        self._rebuild_tree(select_id=select_id)
+
+    def _children_by_parent(self) -> dict[int | None, list[Chapter]]:
+        by_parent: dict[int | None, list[Chapter]] = {}
+        for chapter in self._chapters:
+            by_parent.setdefault(chapter.parent_id, []).append(chapter)
+        for items in by_parent.values():
+            items.sort(key=lambda c: c.name_de.casefold())
+        return by_parent
+
+    def _rebuild_tree(self, select_id: int | None = None) -> None:
+        query = self._filter_input.text().strip().casefold()
+        by_parent = self._children_by_parent()
+
+        def matches(chapter: Chapter) -> bool:
+            return (
+                not query
+                or query in chapter.name_de.casefold()
+                or query in (chapter.name_en or "").casefold()
+            )
+
+        def subtree_matches(chapter: Chapter) -> bool:
+            if matches(chapter):
+                return True
+            return any(subtree_matches(child) for child in by_parent.get(chapter.id, []))
+
+        self._tree.blockSignals(True)
+        self._tree.clear()
+
+        def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
+            for chapter in by_parent.get(parent_id, []):
+                if not subtree_matches(chapter):
+                    continue
+                base = (
+                    f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+                )
+                label = base if chapter.visible else f"{base} (versteckt)"
+                node = QTreeWidgetItem([label])
+                node.setData(0, Qt.ItemDataRole.UserRole, chapter.id)
+                if not chapter.visible:
+                    node.setForeground(0, Qt.GlobalColor.darkGray)
+                if parent_item is None:
+                    self._tree.addTopLevelItem(node)
+                else:
+                    parent_item.addChild(node)
+                add_nodes(node, chapter.id)
+
+        add_nodes(None, None)
+        self._tree.expandAll()
+        self._tree.blockSignals(False)
+        if select_id is not None:
+            self._select_in_tree(select_id)
+
+    def _select_in_tree(self, chapter_id: int) -> None:
+        def walk(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            if item.data(0, Qt.ItemDataRole.UserRole) == chapter_id:
+                return item
+            for i in range(item.childCount()):
+                found = walk(item.child(i))
+                if found is not None:
+                    return found
+            return None
+
+        for i in range(self._tree.topLevelItemCount()):
+            top_item = self._tree.topLevelItem(i)
+            if top_item is None:
                 continue
-            label = f"{c.name_de} | {c.name_en}" if c.name_en else c.name_de
-            self.parent_combo.addItem(label, c.id)
-            if chapter is not None and chapter.parent_id == c.id:
-                self.parent_combo.setCurrentIndex(self.parent_combo.count() - 1)
+            found = walk(top_item)
+            if found is not None:
+                self._tree.setCurrentItem(found)
+                return
 
-        form.addRow("Name (DE)", self.name_de)
-        form.addRow("Name (EN)", self.name_en)
-        form.addRow("Elternkapitel", self.parent_combo)
-        form.addRow("", self.visible)
+    def _selected_chapter(self) -> Chapter | None:
+        item = self._tree.currentItem()
+        if item is None:
+            return None
+        chapter_id = item.data(0, Qt.ItemDataRole.UserRole)
+        return next((c for c in self._chapters if c.id == chapter_id), None)
 
-        buttons = QHBoxLayout()
-        ok = QPushButton("Speichern", self)
-        cancel = QPushButton("Abbrechen", self)
-        ok.clicked.connect(self.accept)
-        cancel.clicked.connect(self.reject)
-        buttons.addWidget(ok)
-        buttons.addWidget(cancel)
-        form.addRow(buttons)
+    def _descendant_ids(self, chapter_id: int) -> set[int]:
+        by_parent = self._children_by_parent()
+        out: set[int] = set()
 
-    def payload(self) -> tuple[str, str, bool, int | None]:
-        parent_id = self.parent_combo.currentData()
-        return (
-            self.name_de.text().strip(),
-            self.name_en.text().strip(),
-            self.visible.isChecked(),
-            int(parent_id) if isinstance(parent_id, int) else None,
+        def walk(parent_id: int) -> None:
+            for child in by_parent.get(parent_id, []):
+                out.add(child.id)
+                walk(child.id)
+
+        walk(chapter_id)
+        return out
+
+    def _rebuild_parent_combo(self, exclude: set[int], selected: int | None) -> None:
+        self._parent_combo.clear()
+        self._parent_combo.addItem("Kein Elternkapitel", None)
+        for chapter in sorted(self._chapters, key=lambda c: c.name_de.casefold()):
+            if chapter.id in exclude:
+                continue
+            label = f"{chapter.name_de} | {chapter.name_en}" if chapter.name_en else chapter.name_de
+            self._parent_combo.addItem(label, chapter.id)
+            if selected is not None and chapter.id == selected:
+                self._parent_combo.setCurrentIndex(self._parent_combo.count() - 1)
+
+    def _on_selection_changed(self) -> None:
+        chapter = self._selected_chapter()
+        self._btn_new_child.setEnabled(chapter is not None)
+        self._btn_delete.setEnabled(chapter is not None)
+        if chapter is None:
+            return
+        self._edit_id = chapter.id
+        self._mode_label.setText(f"Kapitel bearbeiten: {chapter.name_de}")
+        self._name_de.setText(chapter.name_de)
+        self._name_en.setText(chapter.name_en)
+        self._visible.setChecked(chapter.visible)
+        # Selbst und Nachfahren ausschließen, sonst entstehen Zyklen im Baum.
+        self._rebuild_parent_combo(
+            exclude={chapter.id} | self._descendant_ids(chapter.id),
+            selected=chapter.parent_id,
         )
+        self._btn_save.setText("Änderungen speichern")
+
+    def _start_new(self, parent_id: int | None = None) -> None:
+        self._edit_id = None
+        self._tree.blockSignals(True)
+        self._tree.clearSelection()
+        self._tree.setCurrentItem(None)  # type: ignore[call-overload]
+        self._tree.blockSignals(False)
+        self._btn_new_child.setEnabled(False)
+        self._btn_delete.setEnabled(False)
+        self._mode_label.setText("Neues Kapitel")
+        self._name_de.clear()
+        self._name_en.clear()
+        self._visible.setChecked(True)
+        self._rebuild_parent_combo(exclude=set(), selected=parent_id)
+        self._btn_save.setText("Kapitel anlegen")
+        self._name_de.setFocus()
+
+    def _start_new_child(self) -> None:
+        chapter = self._selected_chapter()
+        self._start_new(parent_id=chapter.id if chapter is not None else None)
+
+    def _save(self) -> None:
+        name_de = self._name_de.text().strip()
+        name_en = self._name_en.text().strip()
+        if not name_de:
+            QMessageBox.warning(self, "Kapitel", "Name (DE) darf nicht leer sein.")
+            return
+        parent_data = self._parent_combo.currentData()
+        parent_id = int(parent_data) if isinstance(parent_data, int) else None
+        try:
+            saved_id = self._service.save_chapter(
+                self._edit_id, name_de, name_en, self._visible.isChecked(), parent_id=parent_id
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Kapitel speichern fehlgeschlagen", str(exc))
+            return
+        self._on_changed()
+        self._reload(select_id=saved_id)
+
+    def _delete_selected(self) -> None:
+        chapter = self._selected_chapter()
+        if chapter is None:
+            return
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Kapitel löschen")
+        confirm.setText(f"Kapitel „{chapter.name_de}“ und alle Unterkapitel löschen?")
+        confirm.setInformativeText("Wie sollen die zugeordneten Begriffe behandelt werden?")
+        with_terms_btn = confirm.addButton(
+            "Mit Begriffen löschen", QMessageBox.ButtonRole.DestructiveRole
+        )
+        keep_terms_btn = confirm.addButton(
+            "Begriffe behalten (ohne Kapitel)", QMessageBox.ButtonRole.AcceptRole
+        )
+        confirm.addButton(QMessageBox.StandardButton.Cancel)
+        confirm.exec()
+        clicked = confirm.clickedButton()
+        if clicked == with_terms_btn:
+            self._service.delete_chapter(chapter.id, delete_terms=True)
+        elif clicked == keep_terms_btn:
+            self._service.delete_chapter(chapter.id, delete_terms=False)
+        else:
+            return
+        self._on_changed()
+        self._reload()
+        self._start_new()
 
 
 class RecommendationDialog(QDialog):
@@ -1872,133 +2104,13 @@ class MainWindow(QMainWindow):
     def _manage_chapters(self) -> None:
         if not self.is_unlocked:
             return
-        selector = QDialog(self)
-        selector.setWindowTitle("Kapitel verwalten")
-        selector.resize(700, 520)
-        layout = QVBoxLayout(selector)
-        tree = QTreeWidget(selector)
-        tree.setColumnCount(1)
-        tree.setHeaderLabels([" "])
-        tree.setHeaderHidden(True)
-        tree.header().hide()
-        tree.header().setVisible(False)
-        tree.header().setFixedHeight(0)
-        tree.header().setMinimumSectionSize(0)
-        tree.header().setDefaultSectionSize(0)
-        tree.setRootIsDecorated(True)
-        tree.setIndentation(18)
-        layout.addWidget(tree)
+        dlg = ChapterManagerDialog(self.service, on_changed=self._on_chapters_changed, parent=self)
+        dlg.exec()
 
-        buttons = QHBoxLayout()
-        b_add = QPushButton("Hinzufügen", selector)
-        b_edit = QPushButton("Bearbeiten", selector)
-        b_delete = QPushButton("Löschen", selector)
-        b_close = QPushButton("Schließen", selector)
-        buttons.addWidget(b_add)
-        buttons.addWidget(b_edit)
-        buttons.addWidget(b_delete)
-        buttons.addStretch(1)
-        buttons.addWidget(b_close)
-        layout.addLayout(buttons)
-
-        def refresh_tree(select_id: int | None = None) -> list[Chapter]:
-            chapters = self.service.list_chapters()
-            by_parent: dict[int | None, list[Chapter]] = {}
-            for ch in chapters:
-                by_parent.setdefault(ch.parent_id, []).append(ch)
-            for items in by_parent.values():
-                items.sort(key=lambda c: c.name_de.casefold())
-            tree.clear()
-
-            def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: int | None) -> None:
-                for ch in by_parent.get(parent_id, []):
-                    base = f"{ch.name_de} | {ch.name_en}" if ch.name_en else ch.name_de
-                    label = f"{base} ({'sichtbar' if ch.visible else 'versteckt'})"
-                    node = QTreeWidgetItem([label])
-                    node.setData(0, Qt.ItemDataRole.UserRole, ch.id)
-                    if not ch.visible:
-                        node.setForeground(0, Qt.GlobalColor.darkGray)
-                    if parent_item is None:
-                        tree.addTopLevelItem(node)
-                    else:
-                        parent_item.addChild(node)
-                    if select_id is not None and ch.id == select_id:
-                        tree.setCurrentItem(node)
-                    add_nodes(node, ch.id)
-
-            add_nodes(None, None)
-            tree.expandAll()
-            return chapters
-
-        chapters_cache = refresh_tree()
-
-        def add_chapter() -> None:
-            dlg = ChapterDialog(chapters=chapters_cache, parent=selector)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            name_de, name_en, visible, parent_id = dlg.payload()
-            new_id = self.service.save_chapter(None, name_de, name_en, visible, parent_id=parent_id)
-            nonlocal_chapters_refresh(new_id)
-
-        def edit_chapter() -> None:
-            current = tree.currentItem()
-            if current is None:
-                return
-            chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
-            if not isinstance(chapter_id, int):
-                return
-            chapter = next((c for c in chapters_cache if c.id == chapter_id), None)
-            if chapter is None:
-                return
-            dlg = ChapterDialog(chapter=chapter, chapters=chapters_cache, parent=selector)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            name_de, name_en, visible, parent_id = dlg.payload()
-            self.service.save_chapter(chapter_id, name_de, name_en, visible, parent_id=parent_id)
-            nonlocal_chapters_refresh(chapter_id)
-
-        def delete_chapter() -> None:
-            current = tree.currentItem()
-            if current is None:
-                return
-            chapter_id = current.data(0, Qt.ItemDataRole.UserRole)
-            if not isinstance(chapter_id, int):
-                return
-            confirm = QMessageBox(selector)
-            confirm.setIcon(QMessageBox.Icon.Warning)
-            confirm.setWindowTitle("Kapitel löschen")
-            confirm.setText("Kapitel und alle Unterkapitel wirklich löschen?")
-            confirm.setInformativeText("Wie sollen die zugeordneten Begriffe behandelt werden?")
-            with_terms_btn = confirm.addButton(
-                "Mit Begriffen löschen", QMessageBox.ButtonRole.DestructiveRole
-            )
-            keep_terms_btn = confirm.addButton(
-                "Begriffe behalten (ohne Kapitel)", QMessageBox.ButtonRole.AcceptRole
-            )
-            confirm.addButton(QMessageBox.StandardButton.Cancel)
-            confirm.exec()
-            clicked = confirm.clickedButton()
-            if clicked == with_terms_btn:
-                self.service.delete_chapter(chapter_id, delete_terms=True)
-            elif clicked == keep_terms_btn:
-                self.service.delete_chapter(chapter_id, delete_terms=False)
-            else:
-                return
-            nonlocal_chapters_refresh()
-
-        def nonlocal_chapters_refresh(select_id: int | None = None) -> None:
-            nonlocal chapters_cache
-            chapters_cache = refresh_tree(select_id)
-            self._load_chapters()
-            self._refresh_term_sidebar()
-            self._search(self.search_input.text())
-
-        b_add.clicked.connect(add_chapter)
-        b_edit.clicked.connect(edit_chapter)
-        b_delete.clicked.connect(delete_chapter)
-        b_close.clicked.connect(selector.reject)
-
-        selector.exec()
+    def _on_chapters_changed(self) -> None:
+        self._load_chapters()
+        self._refresh_term_sidebar()
+        self._search(self.search_input.text())
 
     def _open_batch_edit(self) -> None:
         if not self.is_unlocked:
