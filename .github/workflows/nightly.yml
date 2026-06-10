@@ -31,11 +31,43 @@ jobs:
 
       - name: Build app (macOS)
         if: runner.os == 'macOS'
-        run: uv run pyinstaller --name TerminologyManager --windowed src/terminology_manager/main.py
+        run: >
+          uv run pyinstaller
+          --name TerminologyManager
+          --windowed
+          --add-data "src/terminology_manager/assets:terminology_manager/assets"
+          src/terminology_manager/main.py
+
+      - name: Prepare Windows icon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv run python -c "from pathlib import Path; from PIL import Image; p=Path('src/terminology_manager/assets/app_icon.png'); Image.open(p).save('app_icon.ico', format='ICO')"
 
       - name: Build app (Windows)
         if: runner.os == 'Windows'
-        run: uv run pyinstaller --name TerminologyManager --windowed --onefile src/terminology_manager/main.py
+        run: >
+          uv run pyinstaller
+          --name TerminologyManager
+          --windowed
+          --onefile
+          --icon app_icon.ico
+          --add-data "src/terminology_manager/assets;terminology_manager/assets"
+          src/terminology_manager/main.py
+
+      - name: Code sign (Windows, optional)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERTIFICATE_PFX_BASE64: ${{ secrets.CERTIFICATE_PFX_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:CERTIFICATE_PASSWORD)) {
+            Write-Host "Signing skipped: CERTIFICATE_PFX_BASE64/CERTIFICATE_PASSWORD not set."
+            exit 0
+          }
+          [IO.File]::WriteAllBytes("codesign.pfx", [Convert]::FromBase64String($env:CERTIFICATE_PFX_BASE64))
+          signtool sign /fd SHA256 /f codesign.pfx /p "$env:CERTIFICATE_PASSWORD" /tr http://timestamp.digicert.com /td SHA256 /v dist/TerminologyManager.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
