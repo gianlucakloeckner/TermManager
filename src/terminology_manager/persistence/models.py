@@ -107,3 +107,14 @@ class VersionEvent(Base):
     changed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
     before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TermRecommendation(Base):
+    __tablename__ = "term_recommendations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    de: Mapped[str] = mapped_column(String(255), nullable=False)
+    en: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

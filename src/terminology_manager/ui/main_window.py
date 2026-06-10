@@ -14,6 +14,8 @@ from typing import Any
 
 from PySide6.QtCore import (
     QObject,
+    QRect,
+    QRectF,
     QRunnable,
     QSignalBlocker,
     QSize,
@@ -73,6 +75,7 @@ from terminology_manager.services.update_service import GitHubUpdateService, Upd
 from terminology_manager.ui.image_editor_dialog import ImageEditorDialog
 
 PIN_LENGTH = 4
+TOOLBAR_ICON_SIZE = 26
 
 
 class SearchWorkerSignals(QObject):
@@ -214,6 +217,116 @@ class ChapterDialog(QDialog):
         )
 
 
+
+class RecommendationDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Vorschlag machen")
+        self.setFixedSize(400, 160)
+        form = QFormLayout(self)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(10)
+        self.de_input = QLineEdit(self)
+        self.de_input.setPlaceholderText("Deutschen Begriff eingeben …")
+        self.en_input = QLineEdit(self)
+        self.en_input.setPlaceholderText("English term …")
+        form.addRow("Deutsch", self.de_input)
+        form.addRow("Englisch", self.en_input)
+        buttons = QHBoxLayout()
+        btn_submit = QPushButton("Vorschlag einreichen", self)
+        btn_cancel = QPushButton("Abbrechen", self)
+        btn_submit.clicked.connect(self._submit)
+        btn_cancel.clicked.connect(self.reject)
+        buttons.addWidget(btn_submit)
+        buttons.addWidget(btn_cancel)
+        form.addRow(buttons)
+
+    def _submit(self) -> None:
+        if not self.de_input.text().strip() and not self.en_input.text().strip():
+            QMessageBox.warning(
+                self, "Fehlende Felder", "Bitte mindestens einen Begriff (Deutsch oder Englisch) eingeben."
+            )
+            return
+        self.accept()
+
+    def payload(self) -> tuple[str, str]:
+        return self.de_input.text().strip(), self.en_input.text().strip()
+
+
+class RecommendationReviewDialog(QDialog):
+    def __init__(self, service: TerminologyService, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._service = service
+        self._accepted_term_id: int | None = None
+        self.setWindowTitle("Vorschläge")
+        self.resize(640, 400)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        self._table = QTableWidget(0, 4, self)
+        self._table.setHorizontalHeaderLabels(["Deutsch", "Englisch", "Eingereicht am", ""])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        layout.addWidget(self._table)
+        btn_close = QPushButton("Schließen", self)
+        btn_close.clicked.connect(self.accept)
+        hbox = QHBoxLayout()
+        hbox.addStretch()
+        hbox.addWidget(btn_close)
+        layout.addLayout(hbox)
+        self._reload()
+
+    @property
+    def accepted_term_id(self) -> int | None:
+        return self._accepted_term_id
+
+    def _reload(self) -> None:
+        recs = self._service.list_pending_recommendations()
+        self._table.setRowCount(len(recs))
+        for row_idx, rec in enumerate(recs):
+            created_raw = str(rec.get("created_at", ""))
+            self._table.setItem(row_idx, 0, QTableWidgetItem(str(rec.get("de", ""))))
+            self._table.setItem(row_idx, 1, QTableWidgetItem(str(rec.get("en", ""))))
+            self._table.setItem(row_idx, 2, QTableWidgetItem(created_raw[:10]))
+            rec_id = int(rec["id"])
+            action_widget = QWidget(self)
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(4, 2, 4, 2)
+            action_layout.setSpacing(4)
+            btn_accept = QPushButton("✓ Annehmen", action_widget)
+            btn_accept.setStyleSheet("color: #16A34A; font-weight: 700;")
+            btn_deny = QPushButton("✗ Ablehnen", action_widget)
+            btn_deny.setStyleSheet("color: #DC2626; font-weight: 700;")
+            btn_accept.clicked.connect(lambda _, r=rec_id: self._on_accept(r))
+            btn_deny.clicked.connect(lambda _, r=rec_id: self._on_deny(r))
+            action_layout.addWidget(btn_accept)
+            action_layout.addWidget(btn_deny)
+            self._table.setCellWidget(row_idx, 3, action_widget)
+
+    def _on_accept(self, rec_id: int) -> None:
+        try:
+            self._accepted_term_id = self._service.accept_recommendation(rec_id)
+            self.accept()
+        except Exception as exc:
+            QMessageBox.warning(self, "Fehler", str(exc))
+
+    def _on_deny(self, rec_id: int) -> None:
+        try:
+            self._service.deny_recommendation(rec_id)
+            self._reload()
+        except Exception as exc:
+            QMessageBox.warning(self, "Fehler", str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, service: TerminologyService, config: AppConfig) -> None:
         super().__init__()
@@ -244,6 +357,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_all()
         self._set_lock_state(False)
+        self._refresh_recommendation_badge()
         self._ensure_edit_pin_in_db()
         if self.config.auto_update_check:
             QTimer.singleShot(1200, self._check_for_updates_silent)
@@ -252,17 +366,23 @@ class MainWindow(QMainWindow):
         top = QToolBar("Menü")
         top.setMovable(False)
         top.setFixedHeight(64)
+        top.setStyleSheet("QToolBar { spacing: 4px; }")
         self.addToolBar(top)
 
         logo_label = QLabel(self)
         logo_pixmap = self._toolbar_logo_pixmap(width=180, height=52)
         if not logo_pixmap.isNull():
             logo_label.setPixmap(logo_pixmap)
-            logo_label.setFixedSize(188, 56)
+            logo_label.setFixedSize(logo_pixmap.width(), 56)
             logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             top.addWidget(logo_label)
 
         top.addSeparator()
+        self.btn_recommend = QAction("Vorschlag machen", self)
+        self.btn_recommend.setToolTip("Neuen Begriff vorschlagen")
+        self.btn_recommend.triggered.connect(self._on_recommend_clicked)
+        top.addAction(self.btn_recommend)
+
         self.btn_new = QAction("Neuer Begriff", self)
         self.btn_save = QAction("Speichern", self)
         self.btn_delete = QAction("Löschen", self)
@@ -305,6 +425,12 @@ class MainWindow(QMainWindow):
         self.search_dropdown.itemClicked.connect(self._on_search_result_clicked)
 
         self._load_lock_icons()
+        self._review_recommendations_action = QAction("Vorschläge prüfen", self)
+        self._review_recommendations_action.setIcon(self.notification_icon)
+        self._review_recommendations_action.triggered.connect(self._on_review_recommendations_clicked)
+        self._review_recommendations_action.setVisible(False)
+        top.addAction(self._review_recommendations_action)
+
         self.lock_action = QAction("Bearbeitung entsperren", self)
         self.lock_action.setCheckable(True)
         self.lock_action.triggered.connect(self._toggle_lock)
@@ -333,7 +459,9 @@ class MainWindow(QMainWindow):
         filter_row_layout.addWidget(self.sidebar_tree_filter_input, 1)
         self.sidebar_sort_btn = QPushButton("A-Z", self)
         self.sidebar_sort_btn.setCheckable(True)
-        self.sidebar_sort_btn.setFixedWidth(44)
+        self.sidebar_sort_btn.setFixedWidth(64)
+        btn_height = self.sidebar_sort_btn.sizeHint().height()
+        self.sidebar_tree_filter_input.setFixedHeight(btn_height)
         self.sidebar_sort_btn.setToolTip("Alphabetische Liste ohne Gruppen anzeigen")
         self.sidebar_sort_btn.toggled.connect(self._on_sidebar_flat_toggled)
         filter_row_layout.addWidget(self.sidebar_sort_btn)
@@ -677,8 +805,12 @@ class MainWindow(QMainWindow):
         assets_dir = Path(__file__).resolve().parents[1] / "assets"
         locked_svg = assets_dir / "lock-closed.svg"
         unlocked_svg = assets_dir / "lock-open.svg"
-        self.lock_icon = self._colored_svg_icon(locked_svg, QColor("#DC2626"))  # red
-        self.unlock_icon = self._colored_svg_icon(unlocked_svg, QColor("#16A34A"))  # green
+        self.lock_icon = self._colored_svg_icon(locked_svg, QColor("#DC2626"), size=TOOLBAR_ICON_SIZE)  # red
+        self.unlock_icon = self._colored_svg_icon(unlocked_svg, QColor("#16A34A"), size=TOOLBAR_ICON_SIZE)  # green
+        notification_svg = assets_dir / "notification.svg"
+        self.notification_icon = self._colored_svg_icon(
+            notification_svg, QColor("#9CA3AF"), size=TOOLBAR_ICON_SIZE
+        )  # grey when no pending recommendations
 
     def _colored_svg_icon(self, path: Path, color: QColor, size: int = 18) -> QIcon:
         if not path.exists():
@@ -693,6 +825,37 @@ class MainWindow(QMainWindow):
         renderer.render(painter)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
         painter.fillRect(pixmap.rect(), color)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _notification_badge_icon(self, count: int, size: int = TOOLBAR_ICON_SIZE) -> QIcon:
+        path = Path(__file__).resolve().parents[1] / "assets" / "notification.svg"
+        if not path.exists():
+            return QIcon()
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return QIcon()
+
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter, QRectF(0, 0, size, size))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(QRect(0, 0, size, size), QColor("#16A34A"))
+
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        badge_d = max(12, round(size * 0.6))
+        badge = QRect(size - badge_d, 0, badge_d, badge_d)
+        painter.setBrush(QColor("#DC2626"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(badge)
+        painter.setPen(QColor("#FFFFFF"))
+        font = QFont()
+        font.setPixelSize(max(7, round(badge_d * 0.7)))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "9+" if count > 9 else str(count))
         painter.end()
         return QIcon(pixmap)
 
@@ -819,11 +982,14 @@ class MainWindow(QMainWindow):
             self.btn_manage_chapters,
         ]:
             action.setEnabled(unlocked)
+            action.setVisible(unlocked)
         for button in self.edit_buttons:
             button.setEnabled(unlocked)
             button.setCursor(
                 Qt.CursorShape.PointingHandCursor if unlocked else Qt.CursorShape.ForbiddenCursor
             )
+        self._review_recommendations_action.setVisible(unlocked)
+        self.btn_recommend.setVisible(not unlocked)
 
     def _on_chapter_filter_changed(self, _text: str) -> None:
         selected = self._selected_chapter_ids_from_tree()
@@ -852,8 +1018,40 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Falsche PIN - Bearbeitung bleibt gesperrt", 3000)
             return
         self._set_lock_state(checked)
+        if checked:
+            self._refresh_recommendation_badge()
         self.statusBar().showMessage(
             "Bearbeitung entsperrt" if checked else "Bearbeitung gesperrt", 3000
+        )
+
+    def _on_recommend_clicked(self) -> None:
+        dlg = RecommendationDialog(parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        de, en = dlg.payload()
+        try:
+            self.service.submit_recommendation(de, en)
+            self._refresh_recommendation_badge()
+            self.statusBar().showMessage("Vorschlag eingereicht", 3000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Fehler", str(exc))
+
+    def _on_review_recommendations_clicked(self) -> None:
+        dlg = RecommendationReviewDialog(service=self.service, parent=self)
+        dlg.exec()
+        term_id = dlg.accepted_term_id
+        if term_id is not None:
+            self._refresh_term_sidebar()
+            self._load_term(term_id)
+        self._refresh_recommendation_badge()
+
+    def _refresh_recommendation_badge(self) -> None:
+        count = self.service.count_pending_recommendations()
+        label = f"Vorschläge prüfen ({count})" if count > 0 else "Vorschläge prüfen"
+        self._review_recommendations_action.setText(label)
+        self._review_recommendations_action.setToolTip(label)
+        self._review_recommendations_action.setIcon(
+            self._notification_badge_icon(count) if count > 0 else self.notification_icon
         )
 
     def _request_edit_pin(self) -> bool:

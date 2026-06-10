@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session, joinedload
 
 from terminology_manager.domain.entities import SearchResult, VersionRecord
@@ -17,6 +17,7 @@ from terminology_manager.persistence.models import (
     Synonym,
     Term,
     TermChapter,
+    TermRecommendation,
     VersionEvent,
 )
 
@@ -340,6 +341,50 @@ class TermRepository:
 
         uniq: dict[int, Term] = {term.id: term for term in terms}
         return list(uniq.values())
+
+
+class TermRecommendationRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create(self, de: str, en: str) -> TermRecommendation:
+        rec = TermRecommendation(de=de.strip(), en=en.strip())
+        self.session.add(rec)
+        self.session.flush()
+        return rec
+
+    def list_pending(self) -> list[TermRecommendation]:
+        return list(
+            self.session.scalars(
+                select(TermRecommendation)
+                .where(TermRecommendation.status == "pending")
+                .order_by(TermRecommendation.created_at.asc())
+            ).all()
+        )
+
+    def count_pending(self) -> int:
+        result = self.session.scalar(
+            select(func.count(TermRecommendation.id)).where(TermRecommendation.status == "pending")
+        )
+        return result or 0
+
+    def accept(self, rec_id: int) -> TermRecommendation:
+        rec = self.session.get(TermRecommendation, rec_id)
+        if rec is None:
+            raise ValueError("recommendation not found")
+        rec.status = "accepted"
+        rec.reviewed_at = datetime.utcnow()
+        self.session.flush()
+        return rec
+
+    def deny(self, rec_id: int) -> TermRecommendation:
+        rec = self.session.get(TermRecommendation, rec_id)
+        if rec is None:
+            raise ValueError("recommendation not found")
+        rec.status = "denied"
+        rec.reviewed_at = datetime.utcnow()
+        self.session.flush()
+        return rec
 
 
 def serialize_term(term: Term) -> dict[str, Any]:

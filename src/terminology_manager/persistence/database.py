@@ -41,6 +41,17 @@ def initialize_database(engine: Engine) -> None:
         conn.execute(text("DROP TABLE IF EXISTS annotations"))
 
         conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS term_recommendations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    de TEXT NOT NULL,
+                    en TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at DATETIME
+                )
+                """))
+
+        conn.execute(text("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS term_fts USING fts5(
                     term_id UNINDEXED,
                     de,
