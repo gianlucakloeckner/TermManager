@@ -38,6 +38,7 @@ from PySide6.QtGui import (
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -1643,7 +1644,16 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Update", "Update wird installiert. Die App wird neu gestartet."
         )
+        self._quit_for_update()
+
+    def _quit_for_update(self) -> None:
+        # close() reicht nicht: Der Update-Check läuft aus dem modalen
+        # Einstellungs-Dialog, dessen exec-Loop den Prozess am Leben hält —
+        # das Updater-Skript wartet dann vergeblich auf das Prozessende.
         self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _apply_downloaded_update_windows(self, file_path: Path) -> None:
         is_frozen = bool(getattr(sys, "frozen", False))
@@ -1680,45 +1690,66 @@ class MainWindow(QMainWindow):
             return
 
         updater_bat = file_path.parent / "apply_update.bat"
-        # PyInstaller-Onefile: Der Bootloader-Prozess hält die EXE auch nach dem
-        # Ende des Python-Kindprozesses (unsere PID) noch gesperrt, bis das
-        # Temp-Verzeichnis aufgeräumt ist. Deshalb wird das Kopieren wiederholt,
-        # bis das Datei-Lock weg ist (max. ~2 Minuten).
-        # "timeout" bricht ohne Konsole (DETACHED_PROCESS) sofort ab; "ping" als
-        # Sleep-Ersatz funktioniert auch ohne Konsole.
+        log_file = file_path.parent / "apply_update.log"
+        # Eine laufende EXE kann unter Windows nicht überschrieben, aber
+        # umbenannt werden. Daher: alte EXE nach .old verschieben, neue an den
+        # Platz kopieren, neu starten. Verschieben/Kopieren wird wiederholt,
+        # bis das Lock des PyInstaller-Bootloaders weg ist (max. ~2 Minuten).
+        # "timeout" funktioniert ohne interaktive Konsole nicht; "ping" schon.
+        # Jeder Schritt loggt nach apply_update.log zur Diagnose.
         bat_content = (
             "@echo off\n"
             "setlocal\n"
             f'set "TARGET={current_exe}"\n'
             f'set "SOURCE={new_exe}"\n'
+            f'set "BACKUP={current_exe}.old"\n'
             f'set "PID={os.getpid()}"\n'
+            f'set "LOG={log_file}"\n'
+            "set WAITED=0\n"
             "set ATTEMPTS=0\n"
+            'echo [%date% %time%] Warte auf Prozessende PID %PID% > "%LOG%"\n'
             ":waitloop\n"
             'tasklist /FI "PID eq %PID%" | find "%PID%" >nul\n'
-            "if errorlevel 1 goto copyloop\n"
+            "if errorlevel 1 goto replaceloop\n"
+            "set /a WAITED+=1\n"
+            "if %WAITED% GEQ 60 goto replaceloop\n"
             "ping 127.0.0.1 -n 2 >nul\n"
             "goto waitloop\n"
-            ":copyloop\n"
-            'copy /Y "%SOURCE%" "%TARGET%" >nul 2>&1\n'
+            ":replaceloop\n"
+            'echo [%date% %time%] Ersetze EXE, Versuch %ATTEMPTS% >> "%LOG%"\n'
+            'if exist "%BACKUP%" del /F /Q "%BACKUP%" >> "%LOG%" 2>&1\n'
+            'move /Y "%TARGET%" "%BACKUP%" >> "%LOG%" 2>&1\n'
+            "if errorlevel 1 goto retry\n"
+            'copy /Y "%SOURCE%" "%TARGET%" >> "%LOG%" 2>&1\n'
             "if not errorlevel 1 goto launch\n"
+            'move /Y "%BACKUP%" "%TARGET%" >> "%LOG%" 2>&1\n'
+            ":retry\n"
             "set /a ATTEMPTS+=1\n"
-            "if %ATTEMPTS% GEQ 120 goto launch\n"
+            "if %ATTEMPTS% GEQ 120 goto fail\n"
             "ping 127.0.0.1 -n 2 >nul\n"
-            "goto copyloop\n"
+            "goto replaceloop\n"
             ":launch\n"
+            'echo [%date% %time%] Erfolgreich ersetzt, starte App >> "%LOG%"\n'
             'start "" "%TARGET%"\n'
+            'del /F /Q "%BACKUP%" >nul 2>&1\n'
             "exit /b 0\n"
+            ":fail\n"
+            'echo [%date% %time%] Ersetzen fehlgeschlagen, starte alte App >> "%LOG%"\n'
+            'start "" "%TARGET%"\n'
+            "exit /b 1\n"
         )
         # cmd.exe erwartet CRLF; reine LF-Endungen brechen u.a. goto-Label-Scans.
         updater_bat.write_text(bat_content, encoding="utf-8", newline="\r\n")
+        # CREATE_NO_WINDOW statt DETACHED_PROCESS: Das Skript bekommt eine
+        # versteckte Konsole, in der Konsolen-Tools zuverlässig laufen.
         creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
-            getattr(subprocess, "DETACHED_PROCESS", 0)
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
         subprocess.Popen(["cmd", "/c", str(updater_bat)], creationflags=creationflags)
         QMessageBox.information(
             self, "Update", "Update wird installiert. Die App wird neu gestartet."
         )
-        self.close()
+        self._quit_for_update()
 
     def _search(self, query: str) -> None:
         self._start_search(query.strip())
