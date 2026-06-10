@@ -8,4 +8,4 @@ try:
     __version__ = version("terminology-manager")
 except PackageNotFoundError:
     # Fallback für PyInstaller-Builds ohne gebündelte Paketmetadaten.
-    __version__ = "1.3"
+    __version__ = "1.4"
