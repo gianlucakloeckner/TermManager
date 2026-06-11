@@ -14,6 +14,7 @@ from terminology_manager.persistence.database import (
     initialize_database,
     make_session_factory,
 )
+from terminology_manager.services.backup_service import create_daily_backup
 from terminology_manager.services.terminology_service import TerminologyService
 from terminology_manager.ui.main_window import MainWindow
 
@@ -21,6 +22,8 @@ from terminology_manager.ui.main_window import MainWindow
 def main() -> int:
     config = AppConfig.load()
     ensure_data_dir(config.database_path)
+    # Vor initialize_database, damit das Backup den Stand vor Migrationen sichert.
+    create_daily_backup(config.database_path)
     engine = create_sqlite_engine(config.database_url)
     initialize_database(engine)
     session_factory = make_session_factory(engine)
