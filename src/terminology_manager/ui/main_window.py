@@ -1661,11 +1661,27 @@ class MainWindow(QMainWindow):
         subprocess.Popen(
             [str(updater_sh), str(os.getpid()), str(current_bundle), str(new_bundle)],
             start_new_session=True,
+            env=self._updater_environment(),
         )
         QMessageBox.information(
             self, "Update", "Update wird installiert. Die App wird neu gestartet."
         )
         self._quit_for_update()
+
+    def _updater_environment(self) -> dict[str, str]:
+        # Der Updater (und damit die neu gestartete EXE) erbt sonst die
+        # PyInstaller-Bootloader-Variablen dieser Instanz (_MEIPASS2/_PYI_*).
+        # Die neue EXE würde dann die Python-DLL aus dem bereits gelöschten
+        # Temp-Ordner der alten Instanz laden wollen ("Failed to load Python DLL").
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "_MEIPASS2" and not key.startswith("_PYI_")
+        }
+        # Ab PyInstaller 6.10: weist den Bootloader zusätzlich explizit an,
+        # geerbten Prozess-Zustand zu ignorieren.
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        return env
 
     def _quit_for_update(self) -> None:
         # close() reicht nicht: Der Update-Check läuft aus dem modalen
@@ -1773,7 +1789,11 @@ class MainWindow(QMainWindow):
         creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(
             getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
-        subprocess.Popen(["cmd", "/c", str(updater_bat)], creationflags=creationflags)
+        subprocess.Popen(
+            ["cmd", "/c", str(updater_bat)],
+            creationflags=creationflags,
+            env=self._updater_environment(),
+        )
         QMessageBox.information(
             self, "Update", "Update wird installiert. Die App wird neu gestartet."
         )
