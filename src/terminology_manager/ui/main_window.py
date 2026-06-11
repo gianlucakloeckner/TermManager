@@ -27,6 +27,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QCloseEvent,
     QColor,
     QFont,
     QIcon,
@@ -199,7 +200,7 @@ class ChapterManagerDialog(QDialog):
         self._edit_id: int | None = None  # None = neues Kapitel anlegen
 
         self.setWindowTitle("Kapitel verwalten")
-        self.resize(860, 560)
+        self.resize(980, 560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -235,7 +236,7 @@ class ChapterManagerDialog(QDialog):
         content.addLayout(left, 1)
 
         panel = QWidget(self)
-        panel.setFixedWidth(320)
+        panel.setFixedWidth(440)
         right = QVBoxLayout(panel)
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
@@ -245,6 +246,9 @@ class ChapterManagerDialog(QDialog):
 
         form = QFormLayout()
         form.setSpacing(8)
+        # Auf macOS bleiben Felder sonst bei ihrer natürlichen Breite und
+        # Textfelder/Dropdown wären unterschiedlich lang.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self._name_de = QLineEdit(panel)
         self._name_de.setPlaceholderText("Kapitelname (Deutsch)")
         self._name_en = QLineEdit(panel)
@@ -607,12 +611,15 @@ class MainWindow(QMainWindow):
         self.search_request_id = 0
         self._update_progress: QProgressDialog | None = None
         self._sidebar_flat = False
+        self._loaded_state: dict[str, Any] | None = None
+        self._closing_for_update = False
 
         self._build_ui()
         self._refresh_all()
         self._set_lock_state(False)
         self._refresh_recommendation_badge()
         self._ensure_edit_pin_in_db()
+        self._mark_editor_clean()
         if self.config.auto_update_check:
             QTimer.singleShot(1200, self._check_for_updates_silent)
 
@@ -663,8 +670,8 @@ class MainWindow(QMainWindow):
 
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("Suche (de/en/Beschreibung/Synonyme)")
-        self.search_input.setMinimumWidth(220)
-        self.search_input.setMaximumWidth(260)
+        self.search_input.setMinimumWidth(300)
+        self.search_input.setMaximumWidth(360)
         self.search_input.setFixedHeight(36)
         self.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_input.returnPressed.connect(self._select_first_search_result)
@@ -1055,6 +1062,19 @@ class MainWindow(QMainWindow):
             return
         term_id = current.data(0, Qt.ItemDataRole.UserRole)
         if isinstance(term_id, int) and term_id != self.current_term_id:
+            if not self._confirm_discard_changes():
+                # Auswahl auf den noch geladenen Begriff zurücksetzen.
+                with QSignalBlocker(self.sidebar_term_tree):
+                    previous = (
+                        self._find_sidebar_term_item(self.current_term_id)
+                        if self.current_term_id is not None
+                        else None
+                    )
+                    if previous is not None:
+                        self.sidebar_term_tree.setCurrentItem(previous)
+                    else:
+                        self.sidebar_term_tree.clearSelection()
+                return
             self._load_term(term_id)
 
     def _load_lock_icons(self) -> None:
@@ -1302,7 +1322,8 @@ class MainWindow(QMainWindow):
         term_id = dlg.accepted_term_id
         if term_id is not None:
             self._refresh_term_sidebar()
-            self._load_term(term_id)
+            if self._confirm_discard_changes():
+                self._load_term(term_id)
         self._refresh_recommendation_badge()
 
     def _refresh_recommendation_badge(self) -> None:
@@ -1650,10 +1671,17 @@ class MainWindow(QMainWindow):
         # close() reicht nicht: Der Update-Check läuft aus dem modalen
         # Einstellungs-Dialog, dessen exec-Loop den Prozess am Leben hält —
         # das Updater-Skript wartet dann vergeblich auf das Prozessende.
+        self._closing_for_update = True
         self.close()
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self._closing_for_update and not self._confirm_discard_changes():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _apply_downloaded_update_windows(self, file_path: Path) -> None:
         is_frozen = bool(getattr(sys, "frozen", False))
@@ -1879,7 +1907,9 @@ class MainWindow(QMainWindow):
 
     def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
         term_id = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(term_id, int):
+        if isinstance(term_id, int) and term_id != self.current_term_id:
+            if not self._confirm_discard_changes():
+                return
             self._load_term(term_id)
         if self.search_dropdown is not None:
             self.search_dropdown.hide()
@@ -1900,6 +1930,60 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if self.search_dropdown is not None and self.search_dropdown.isVisible():
             self._position_search_dropdown()
+
+    def _checked_chapter_ids(self) -> list[int]:
+        chapter_ids: list[int] = []
+        root = self.chapter_list.invisibleRootItem()
+
+        def collect_checked(node: QTreeWidgetItem) -> None:
+            chapter_id = node.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(chapter_id, int) and node.checkState(0) == Qt.CheckState.Checked:
+                chapter_ids.append(chapter_id)
+            for i in range(node.childCount()):
+                collect_checked(node.child(i))
+
+        for i in range(root.childCount()):
+            collect_checked(root.child(i))
+        return chapter_ids
+
+    def _editor_state(self) -> dict[str, Any]:
+        return {
+            "de": self.term_de.text().strip(),
+            "en": self.term_en.text().strip(),
+            "de_desc": self.term_de_desc.toPlainText(),
+            "en_desc": self.term_en_desc.toPlainText(),
+            "annotations": self.annotations_text.toPlainText(),
+            "synonyms": self._table_rows(self.syn_table, "synonym"),
+            "chapter_ids": sorted(self._checked_chapter_ids()),
+            "image": self.current_image_bytes,
+        }
+
+    def _mark_editor_clean(self) -> None:
+        self._loaded_state = self._editor_state()
+
+    def _has_unsaved_changes(self) -> bool:
+        if not self.is_unlocked or self._loaded_state is None:
+            return False
+        return self._editor_state() != self._loaded_state
+
+    def _confirm_discard_changes(self) -> bool:
+        """True, wenn fortgefahren werden darf (gespeichert/verworfen/keine Änderungen)."""
+        if not self._has_unsaved_changes():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Ungespeicherte Änderungen")
+        box.setText("Der aktuelle Begriff hat ungespeicherte Änderungen.")
+        save_btn = box.addButton("Speichern", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton("Verwerfen", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save_btn:
+            self._save_term()
+            # Speichern kann abbrechen (Pflichtfelder, Duplikat-Nachfrage).
+            return not self._has_unsaved_changes()
+        return clicked == discard_btn
 
     def _load_term(self, term_id: int) -> None:
         term = self.service.get_term(term_id)
@@ -1931,6 +2015,7 @@ class MainWindow(QMainWindow):
         image_has_data = bool(term.get("image"))
         self.current_image_bytes = self._decode_image(term) if image_has_data else None
         self._refresh_image_preview()
+        self._mark_editor_clean()
 
     def _decode_image(self, term: dict[str, Any]) -> bytes | None:
         raw = term.get("image_bytes")
@@ -2007,6 +2092,11 @@ class MainWindow(QMainWindow):
     def _new_term(self) -> None:
         if not self.is_unlocked:
             return
+        if not self._confirm_discard_changes():
+            return
+        self._clear_editor()
+
+    def _clear_editor(self) -> None:
         self.current_term_id = None
         with QSignalBlocker(self.sidebar_term_tree):
             self.sidebar_term_tree.clearSelection()
@@ -2019,6 +2109,7 @@ class MainWindow(QMainWindow):
         self._load_chapters([])
         self.syn_table.setRowCount(0)
         self._refresh_image_preview()
+        self._mark_editor_clean()
 
     def _save_term(self) -> None:
         if not self.is_unlocked:
@@ -2031,19 +2122,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        chapter_ids: list[int] = []
-        root = self.chapter_list.invisibleRootItem()
-
-        def collect_checked(node: QTreeWidgetItem) -> None:
-            chapter_id = node.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(chapter_id, int) and node.checkState(0) == Qt.CheckState.Checked:
-                chapter_ids.append(chapter_id)
-            for i in range(node.childCount()):
-                collect_checked(node.child(i))
-
-        for i in range(root.childCount()):
-            collect_checked(root.child(i))
-
+        chapter_ids = self._checked_chapter_ids()
         synonyms_rows = self._table_rows(self.syn_table, "synonym")
         duplicate_report = self.service.detect_duplicates(
             de,
@@ -2088,6 +2167,7 @@ class MainWindow(QMainWindow):
         )
 
         self.current_term_id = term_id
+        self._mark_editor_clean()
         self.statusBar().showMessage("Begriff gespeichert", 3000)
         self._refresh_term_sidebar()
         self._search(self.search_input.text())
@@ -2102,7 +2182,7 @@ class MainWindow(QMainWindow):
             return
         self.service.delete_term(self.current_term_id)
         self.statusBar().showMessage("Begriff gelöscht", 3000)
-        self._new_term()
+        self._clear_editor()
         self._refresh_term_sidebar()
         self._search(self.search_input.text())
 
@@ -2153,7 +2233,8 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_chapters_changed(self) -> None:
-        self._load_chapters()
+        # Häkchen des geladenen Begriffs beibehalten.
+        self._load_chapters(self._selected_chapter_ids_from_tree())
         self._refresh_term_sidebar()
         self._search(self.search_input.text())
 

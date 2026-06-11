@@ -3,6 +3,8 @@
 Desktop-Anwendung zur Verwaltung zweisprachiger Terminologie (PySide6 + SQLite/FTS5).
 
 ## Dokumentation
+- Funktionen ohne Anmeldung: `USER.md`
+- Admin-Funktionen (entsperrt): `ADMINISTRATOR.md`
 - Benutzerhandbuch: `docs/UserGuide.md`
 - Entwicklerhandbuch: `docs/DeveloperGuide.md`
 
